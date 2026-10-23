@@ -113,8 +113,15 @@ export async function runSync(
 	// 2+3. remote snapshot (journal read inside)
 	const links = makeLinks(deps);
 	deps.event?.({ t: "phase", phase: "scanRemote" });
+	// A state with no entries has no base to plan against, so the remote
+	// tree must be enumerated in full — but that is a *scan*, not one
+	// content download per page: the audit compares structure only and the
+	// content compare then starts from no base (fetch + link). It is the
+	// mandatory cost of re-matching by path, not an extra audit.
+	const coldStart = Object.keys(state.entries).length === 0;
 	const remoteSnap = await snapshotRemote(deps, {
 		full: opts.full,
+		forceAudit: coldStart,
 		roundRobinPerRound: deps.engine.roundRobinPerRound,
 		fullAuditHours: deps.engine.fullAuditHours,
 		links,

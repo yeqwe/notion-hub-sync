@@ -68,6 +68,12 @@ export interface RemoteSnapshot {
 
 export interface RemoteOptions {
 	full: boolean; // "Full sync" command
+	/** Enumerate the whole remote tree this round even when the audit timer
+	 * hasn't expired — used on a cold start, where there is no base to
+	 * compare against and the tree has to be re-matched by path from
+	 * scratch. Unlike `full` this does not disable the incremental search
+	 * pass, so the next round keeps its cursor. */
+	forceAudit?: boolean;
 	roundRobinPerRound: number;
 	fullAuditHours: number;
 	links: LinkResolver;
@@ -90,6 +96,7 @@ export async function snapshotRemote(
 	const outside = new Set(state.outsideTree ?? []);
 	let auditDue =
 		opts.full ||
+		opts.forceAudit === true ||
 		state.lastFullAudit === undefined ||
 		opts.now - state.lastFullAudit > opts.fullAuditHours * 3_600_000;
 

@@ -185,8 +185,13 @@ describe("request budget", () => {
 		await b.sync();
 		fake.reqLog.length = 0;
 		await b.sync();
-		// journal read + search + round-robin/system page fetches only
-		expect(fake.reqLog.length).toBeLessThanOrEqual(6);
+		// journal read + ONE incremental search page + round-robin/system
+		// page fetches. The search is expected here: a cold start used to
+		// pass `full: true`, which skips the search without ever seeding
+		// `state.searchCursor`, so every later round skipped it too and
+		// human edits in Notion were only found by the 6-hour audit. The
+		// cold start now forces the audit without disabling the search.
+		expect(fake.reqLog.length).toBeLessThanOrEqual(7);
 		fake.reqLog.length = 0;
 		cwrite(b, "appearance.json", "v2");
 		await b.sync();
