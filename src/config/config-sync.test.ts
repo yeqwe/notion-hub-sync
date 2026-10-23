@@ -1,7 +1,13 @@
 // Offline two-device config-dir sync tests.
 
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { FakeNotion } from "../../test-support/fake-notion";
 import { makeDevice, type Device } from "../../test-support/device";
@@ -18,6 +24,23 @@ function cread(d: Device, rel: string): string {
 
 function cexists(d: Device, rel: string): boolean {
 	return existsSync(join(d.dir, ".obsidian", ...rel.split("/")));
+}
+
+/** Relative paths of every conflict copy anywhere under `.obsidian`. */
+function findConflictCopy(deviceDir: string): string | undefined {
+	const root = join(deviceDir, ".obsidian");
+	const walk = (rel: string): string[] => {
+		const abs = rel ? join(root, rel) : root;
+		if (!existsSync(abs)) return [];
+		const out: string[] = [];
+		for (const e of readdirSync(abs, { withFileTypes: true })) {
+			const p = rel ? `${rel}/${e.name}` : e.name;
+			if (e.isDirectory()) out.push(...walk(p));
+			else if (p.includes("conflict")) out.push(p);
+		}
+		return out;
+	};
+	return walk("")[0];
 }
 
 function setup() {
@@ -69,18 +92,52 @@ describe("config-dir sync (offline)", () => {
 		await a.sync();
 		await b.sync(); // B conflicts → remote wins locally
 		expect(cread(b, "appearance.json")).toBe("A wins");
-		const copyDir = join(b.dir, ".obsidian");
-		const files = require("node:fs").readdirSync(copyDir) as string[];
-		const copy = files.find((f) => f.includes("conflict"));
+		// the copy lives in our own plugin dir — never in configDir root,
+		// where it would look like an ordinary setting
+		const copy = findConflictCopy(b.dir);
 		expect(copy).toBeTruthy();
+		expect(copy!.startsWith("plugins/notion-hub-sync/")).toBe(true);
 		// B pushes nothing for the copy; A never sees it
 		await b.sync();
 		await a.sync();
 		expect(cread(a, "appearance.json")).toBe("A wins");
-		const aFiles = require("node:fs").readdirSync(
-			join(a.dir, ".obsidian"),
-		) as string[];
-		expect(aFiles.find((f) => f.includes("conflict"))).toBeUndefined();
+		expect(findConflictCopy(a.dir)).toBeUndefined();
+	});
+
+	it("b2. re-serialised JSON (key order/whitespace only) is not a change", async () => {
+		const { a, b } = setup();
+		cwrite(a, "appearance.json", '{"theme":"dark","baseFontSize":16}');
+		await a.sync();
+		await b.sync();
+		expect(cread(b, "appearance.json")).toBe(
+			'{"theme":"dark","baseFontSize":16}',
+		);
+		// the app rewrites the file with a different key order + formatting
+		cwrite(
+			b,
+			"appearance.json",
+			'{\n  "baseFontSize": 16,\n  "theme": "dark"\n}',
+		);
+		const rb = await b.sync();
+		// no push, no conflict, nothing written — the content is the same
+		expect(rb.conflictCopies).toEqual([]);
+		expect(rb.configWritten).toBeFalsy();
+		await a.sync();
+		expect(findConflictCopy(a.dir)).toBeUndefined();
+		expect(findConflictCopy(b.dir)).toBeUndefined();
+	});
+
+	it("b3. a real JSON value change still syncs", async () => {
+		const { a, b } = setup();
+		cwrite(a, "appearance.json", '{"theme":"dark","baseFontSize":16}');
+		await a.sync();
+		await b.sync();
+		cwrite(b, "appearance.json", '{"baseFontSize":17,"theme":"dark"}');
+		await b.sync();
+		await a.sync();
+		expect(cread(a, "appearance.json")).toBe(
+			'{"baseFontSize":17,"theme":"dark"}',
+		);
 	});
 
 	it("d. delete snippet on A → removed on B", async () => {

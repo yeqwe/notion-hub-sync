@@ -7,7 +7,7 @@ import {
 	type WorkspaceLeaf,
 } from "obsidian";
 import { testConnection } from "./connection";
-import { getStrings } from "./i18n";
+import { getStrings, setOverriddenLocale } from "./i18n";
 import { NotionClient } from "./notion/client";
 import { parseNotionId } from "./notion/ids";
 import {
@@ -16,9 +16,10 @@ import {
 	type NotionHubSettings,
 } from "./settings";
 import {
-	loadState,
+	loadStateChecked,
 	makePathResolver,
 	ObsidianVaultIO,
+	quarantineState,
 	saveState,
 } from "./sync/obsidian-vault";
 import { entryByPath } from "./sync/state";
@@ -48,6 +49,13 @@ export default class NotionHubSyncPlugin extends Plugin {
 	private statusEl: HTMLElement | null = null;
 	private ribbonEl: HTMLElement | null = null;
 	private state: SyncState | null = null;
+	/** Set when the persisted state was unreadable — blocks planning against
+	 * an empty base (a whole-vault re-pull per round). */
+	private stateProblem: {
+		kind: string;
+		detail: string;
+		bytes: number;
+	} | null = null;
 	private io: ObsidianVaultIO | null = null;
 	private runner: SyncRunner | null = null;
 	private syncing = false;
@@ -164,11 +172,13 @@ export default class NotionHubSyncPlugin extends Plugin {
 		// preload state so the file-menu can check entries
 		const rootId = parseNotionId(this.settings.rootPage);
 		if (rootId && this.settings.token.trim()) {
-			this.state = await loadState(
+			const loaded = await loadStateChecked(
 				this.app,
 				this.manifest.dir ?? "",
 				rootId,
 			);
+			this.state = loaded.state;
+			this.stateProblem = loaded.problem ?? null;
 			this.updateStatus();
 		}
 
@@ -310,11 +320,23 @@ export default class NotionHubSyncPlugin extends Plugin {
 			return null;
 		}
 		if (!this.state || this.state.rootPageId !== rootId) {
-			this.state = await loadState(
+			const loaded = await loadStateChecked(
 				this.app,
 				this.manifest.dir ?? "",
 				rootId,
 			);
+			this.state = loaded.state;
+			this.stateProblem = loaded.problem ?? null;
+			if (loaded.problem) {
+				this.syncLog.error(
+					getStrings().logStateUnreadable(
+						loaded.problem.kind,
+						loaded.problem.bytes,
+						loaded.problem.detail,
+					),
+				);
+				void this.syncLog.flush();
+			}
 		}
 		const state = this.state;
 		this.io = this.io ?? new ObsidianVaultIO(this.app);
@@ -340,6 +362,7 @@ export default class NotionHubSyncPlugin extends Plugin {
 			configIO: new ObsidianConfigIO(this.app, this.app.vault.configDir),
 			configSync: this.settings.configSync,
 			selfId: this.manifest.id,
+			stateProblem: this.stateProblem,
 			isMobile: Platform.isMobile,
 			engine: {
 				fullAuditHours: this.settings.fullAuditHours,
@@ -626,12 +649,27 @@ export default class NotionHubSyncPlugin extends Plugin {
 		}
 		const deps = await this.syncDeps();
 		if (!deps) return;
+		// The whole point of this command is to start from a clean record —
+		// a corrupted file must not survive it, or the next load reads the
+		// same bytes and lands in the same loop.
+		if (this.stateProblem) {
+			const moved = await quarantineState(
+				this.app,
+				this.manifest.dir ?? "",
+				String(Date.now()),
+			);
+			if (moved) this.syncLog.warn(strings.logStateQuarantined(moved));
+			this.stateProblem = null;
+		}
 		resetState(deps.state);
 		await deps.saveState();
 		this.syncLog.warn(strings.logResetState);
 		void this.syncLog.flush();
 		this.updateStatus();
-		void this.runEngine(true);
+		// No forced full audit: the path re-match below walks the remote tree
+		// anyway, and forcing `full` only adds a second whole-workspace scan
+		// on top of a round that is already the expensive one.
+		void this.runEngine(false);
 	}
 
 	/** Command: trash every page under the Notion root, then re-upload. */
@@ -806,6 +844,7 @@ export default class NotionHubSyncPlugin extends Plugin {
 			this.settings.deviceId = newDeviceId();
 			await this.saveSettings();
 		}
+		setOverriddenLocale(this.settings.language);
 	}
 
 	async saveSettings(): Promise<void> {

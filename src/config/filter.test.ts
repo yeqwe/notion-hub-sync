@@ -19,7 +19,7 @@ describe("configFileAllowed", () => {
 		["appearance.json", true],
 		["hotkeys.json", true],
 		["core-plugins.json", true],
-		["core-plugins-migration.json", true],
+		["core-plugins-migration.json", false], // legacy compat file, app rewrites it
 		["dataview.json", true], // corePluginData catch-all
 		["community-plugins.json", false], // off by default
 		["themes/x/theme.css", true],

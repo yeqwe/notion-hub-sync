@@ -7,7 +7,6 @@ import { sha256Hex } from "../sync/hashes";
 import { planUpload, uploadBytes } from "../sync/upload";
 import { listChildPages } from "../sync/tree";
 import { createPage } from "../sync/push";
-import { conflictPath } from "../sync/paths";
 import { findReservedPage, ensureReservedPage } from "../sync/reserved";
 import type { SyncState } from "../sync/state";
 import type { SyncDeps } from "../sync/deps";
@@ -16,6 +15,7 @@ import type { ConfigIO } from "./config-io";
 import {
 	anyConfigEnabled,
 	configFileAllowed,
+	conflictCopyRel,
 	descendAllowed,
 	type ConfigSyncSettings,
 } from "./filter";
@@ -47,6 +47,61 @@ export interface ConfigSyncResult {
 }
 
 const hex = (id: string): string => id.replace(/-/g, "").toLowerCase();
+
+const CANONICAL_JSON_MAX_BYTES = 2 * 1024 * 1024;
+
+/** Sorted-key JSON serialisation, or null when the text isn't a JSON object. */
+export function canonicalJson(text: string): string | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return null;
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return null;
+	}
+	const norm = (v: unknown): unknown => {
+		if (Array.isArray(v)) return v.map(norm);
+		if (v !== null && typeof v === "object") {
+			const obj = v as Record<string, unknown>;
+			const out: Record<string, unknown> = {};
+			for (const k of Object.keys(obj).sort()) out[k] = norm(obj[k]);
+			return out;
+		}
+		return v;
+	};
+	return JSON.stringify(norm(parsed));
+}
+
+/** Content sha used for change detection.
+ *
+ * JSON files are hashed by a key-order-insensitive canonical form.
+ * Obsidian re-serialises `app.json`, `appearance.json`, `core-plugins.json`
+ * and `community-plugins.json` on every start (a long-standing upstream
+ * complaint), so key order and whitespace drift by themselves. A plain
+ * byte hash then reports "the user changed this file" on a device where
+ * nothing was touched — and a false local change is exactly what turns the
+ * other device's sync into a conflict copy.
+ *
+ * Text that isn't a JSON object (array, scalar, corrupt) falls back to the
+ * byte hash: there the bytes really are the meaning.
+ */
+export async function contentSha(
+	rel: string,
+	bytes: Uint8Array,
+): Promise<string> {
+	if (
+		rel.toLowerCase().endsWith(".json") &&
+		bytes.length <= CANONICAL_JSON_MAX_BYTES
+	) {
+		const canonical = canonicalJson(new TextDecoder().decode(bytes));
+		if (canonical !== null) {
+			return sha256Hex(new TextEncoder().encode(canonical));
+		}
+	}
+	return sha256Hex(bytes);
+}
 
 /** Find (or lazily record) the ⚙️ page; creates nothing (create on push). */
 async function findConfigRoot(
@@ -111,10 +166,14 @@ interface RemoteConfig {
 	mediaBlockId?: string | null;
 }
 
-/** Evaluate one config page → sha (+bytes when content changed). */
+/** Evaluate one config page → sha (+bytes when content changed).
+ * `rel` is the config-relative path the page stands for — the content sha
+ * is only key-order-insensitive for known JSON files, so it must be the
+ * same path the local side and the base were hashed under. */
 async function evalConfigPage(
 	client: NotionClient,
 	pageId: string,
+	rel: string,
 	baseSha: string | undefined,
 	baseBlockId: string | undefined,
 ): Promise<{ sha: string; bytes?: Uint8Array; mediaBlockId: string | null } | null> {
@@ -135,7 +194,11 @@ async function evalConfigPage(
 	)?.file?.url;
 	if (!url) return { sha: baseSha ?? "", mediaBlockId: blockId };
 	const bytes = new Uint8Array(await client.download(url));
-	return { sha: await sha256Hex(bytes), bytes, mediaBlockId: blockId };
+	return {
+		sha: await contentSha(rel, bytes),
+		bytes,
+		mediaBlockId: blockId,
+	};
 }
 
 export async function syncConfig(
@@ -171,13 +234,16 @@ export async function syncConfig(
 			const st = await io.stat(rel);
 			if (!st) continue;
 			statOf.set(rel, st);
-			const b = state.config![rel];
-			const sha =
-				b && b.localMtime === st.mtime && b.localSize === st.size
-					? b.sha
-					: await sha256Hex(
-							new Uint8Array(await io.readBinary(rel)),
-						);
+			// Always re-hash the bytes. An mtime+size short-circuit looks free
+			// but is wrong in the exact case that matters here: an edit that
+			// keeps the byte count identical and lands in the same mtime tick
+			// (iOS reports a coarse mtime) is invisible, so a real setting
+			// change is never pushed. Config files are few and small 鈥?local
+			// IO, not requests 鈥?so reading them is the cheap part.
+			const sha = await contentSha(
+				rel,
+				new Uint8Array(await io.readBinary(rel)),
+			);
 			local[rel] = { exists: true, sha };
 		}
 		for (const name of listing.folders) {
@@ -251,6 +317,7 @@ export async function syncConfig(
 			const r = await evalConfigPage(
 				deps.client,
 				id,
+				rel,
 				b?.sha,
 				b?.mediaBlockId,
 			);
@@ -302,7 +369,7 @@ export async function syncConfig(
 		const st = await io.stat(rel);
 		state.config![rel] = {
 			pageId,
-			sha: await sha256Hex(bytes),
+			sha: await contentSha(rel, bytes),
 			localMtime: st?.mtime,
 			localSize: st?.size,
 			mediaBlockId: remoteBlock.get(rel) ?? undefined,
@@ -333,7 +400,7 @@ export async function syncConfig(
 					const st = await io.stat(a.rel);
 					state.config[a.rel] = {
 						pageId,
-						sha: await sha256Hex(bytes),
+						sha: await contentSha(a.rel, bytes),
 						mediaBlockId: blockId ?? undefined,
 						localMtime: st?.mtime,
 						localSize: st?.size,
@@ -352,7 +419,7 @@ export async function syncConfig(
 						bytes,
 					);
 					const b = state.config[a.rel]!;
-					b.sha = await sha256Hex(bytes);
+					b.sha = await contentSha(a.rel, bytes);
 					b.mediaBlockId = blockId ?? undefined;
 					const st = await io.stat(a.rel);
 					b.localMtime = st?.mtime;
@@ -369,9 +436,13 @@ export async function syncConfig(
 						const localBytes = new Uint8Array(
 							await io.readBinary(a.rel),
 						);
-						const copy = conflictPath(
+						// Never write the copy into configDir itself: it would look
+						// like an ordinary `*.json` setting to Obsidian and to the
+						// next round. The plugin dir is never synced.
+						const copy = conflictCopyRel(
 							a.rel,
-							deps.deviceId.slice(0, 8),
+							deps.selfId,
+							deps.deviceId,
 							new Date(now),
 						);
 						await io.writeBinary(

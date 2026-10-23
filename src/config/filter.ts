@@ -4,12 +4,14 @@
 // community-plugin, community-plugin-data (off by default).
 // Paths are relative to vault.configDir.
 
+import { conflictPath } from "../sync/paths";
+
 export interface SelectiveConfigSettings {
 	app: boolean; // app.json, types.json
 	appearance: boolean; // appearance.json
 	appearanceData: boolean; // themes/<n>/{theme.css,manifest.json}, snippets/<n>.css
 	hotkey: boolean; // hotkeys.json
-	corePlugin: boolean; // core-plugins.json, core-plugins-migration.json
+	corePlugin: boolean; // core-plugins.json
 	corePluginData: boolean; // other top-level *.json
 	communityPlugin: boolean; // community-plugins.json
 	communityPluginData: boolean; // plugins/<id>/{manifest.json,main.js,styles.css,data.json}
@@ -51,11 +53,34 @@ const NEVER_FILES = new Set([
 	"workspace.json",
 	"workspace-mobile.json",
 	"sync.json",
+	// Kept only so a pre-1.0 Obsidian can still read the old format; the
+	// app rewrites it on every start from core-plugins.json. Syncing it
+	// means a guaranteed per-device diff (mobile has a different core set)
+	// with nothing to gain.
+	"core-plugins-migration.json",
 ]);
 
 /** Our conflict-copy naming: `name (conflict <dev> <ISO>).ext` — local only. */
 export function isConflictCopyName(name: string): boolean {
 	return / \(conflict [^)]*\)\.[^.]+$/.test(name) || / \(conflict [^)]*\)$/.test(name);
+}
+
+/** Where a local-only config conflict copy is written.
+ *
+ * Kept under our own plugin dir on purpose: config sync never descends
+ * there (`selfId` is excluded from every permission check), so a copy can
+ * be mistaken for a real setting by neither Obsidian nor the next round —
+ * and it is never pushed to the other device. A copy left in `configDir`
+ * root used to be picked up as an ordinary `*.json` setting.
+ */
+export function conflictCopyRel(
+	rel: string,
+	selfId: string,
+	deviceId: string,
+	when: Date,
+): string {
+	const copy = conflictPath(rel, deviceId.slice(0, 8), when);
+	return selfId ? `plugins/${selfId}/conflicts/${copy}` : copy;
 }
 
 function segsOf(rel: string): string[] {
@@ -96,9 +121,7 @@ export function configFileAllowed(
 	if (rel === "app.json" || rel === "types.json") return c.app;
 	if (rel === "appearance.json") return c.appearance;
 	if (rel === "hotkeys.json") return c.hotkey;
-	if (rel === "core-plugins.json" || rel === "core-plugins-migration.json") {
-		return c.corePlugin;
-	}
+	if (rel === "core-plugins.json") return c.corePlugin;
 	if (rel === "community-plugins.json") return c.communityPlugin;
 	if (
 		segs[0] === "themes" &&

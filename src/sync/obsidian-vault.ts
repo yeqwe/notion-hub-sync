@@ -107,34 +107,112 @@ export class ObsidianVaultIO implements VaultIO {
 	}
 }
 
-/** Load sync-state.json next to the plugin dir; null on mismatch/absent. */
+/** Load sync-state.json next to the plugin dir.
+ *
+ * A failure here used to fall through to `emptyState()` silently, and that
+ * is how a device gets stuck in a loop: one interrupted save leaves the
+ * file truncated, the next round sees "no state", re-downloads the whole
+ * vault (tens of minutes on mobile), and the save at the end of that long
+ * round gets interrupted again. The round must be able to TELL the
+ * difference between "first run" and "my state is unreadable" — the caller
+ * refuses to plan against a fresh state in the second case.
+ */
+export interface LoadedState {
+	state: SyncState;
+	/** present when a state file existed but could not be used. */
+	problem?: {
+		kind: "corrupt" | "root-mismatch";
+		detail: string;
+		/** raw bytes seen, for the message (not the whole file). */
+		bytes: number;
+	};
+}
+
+export async function loadStateChecked(
+	app: App,
+	manifestDir: string,
+	rootPageId: string,
+): Promise<LoadedState> {
+	const path = `${manifestDir}/${STATE_FILE}`;
+	let raw: string;
+	try {
+		raw = await app.vault.adapter.read(path);
+	} catch {
+		return { state: emptyState(rootPageId) }; // genuinely absent
+	}
+	try {
+		const parsed = JSON.parse(raw) as SyncState;
+		if (parsed.version === 1 && parsed.rootPageId === rootPageId) {
+			return { state: parsed };
+		}
+		return {
+			state: emptyState(rootPageId),
+			problem: {
+				kind: "root-mismatch",
+				detail: `version=${String(parsed.version)} rootPageId=${String(
+					parsed.rootPageId,
+				)} (expected ${rootPageId})`,
+				bytes: raw.length,
+			},
+		};
+	} catch (err) {
+		return {
+			state: emptyState(rootPageId),
+			problem: {
+				kind: "corrupt",
+				detail: err instanceof Error ? err.message : String(err),
+				bytes: raw.length,
+			},
+		};
+	}
+}
+
 export async function loadState(
 	app: App,
 	manifestDir: string,
 	rootPageId: string,
 ): Promise<SyncState> {
-	const path = `${manifestDir}/${STATE_FILE}`;
-	try {
-		const raw = await app.vault.adapter.read(path);
-		const parsed = JSON.parse(raw) as SyncState;
-		if (parsed.version === 1 && parsed.rootPageId === rootPageId) {
-			return parsed;
-		}
-	} catch {
-		// missing or corrupt → fresh state
-	}
-	return emptyState(rootPageId);
+	return (await loadStateChecked(app, manifestDir, rootPageId)).state;
 }
 
+/** Write via a temp file + rename so an interrupted save (app backgrounded,
+ * iOS killing the process) can never leave a half-written state file: the
+ * old one stays intact until the new one is complete. */
 export async function saveState(
 	app: App,
 	manifestDir: string,
 	state: SyncState,
 ): Promise<void> {
-	await app.vault.adapter.write(
-		`${manifestDir}/${STATE_FILE}`,
-		JSON.stringify(state, null, 1),
-	);
+	const path = `${manifestDir}/${STATE_FILE}`;
+	const tmp = `${path}.tmp`;
+	const text = JSON.stringify(state, null, 1);
+	const adapter = app.vault.adapter;
+	await adapter.write(tmp, text);
+	try {
+		if (await adapter.exists(path)) await adapter.remove(path);
+		await adapter.rename(tmp, path);
+	} catch {
+		// adapter rename unavailable: fall back to a plain write. Still
+		// better than the tmp file being the only copy.
+		await adapter.write(path, text);
+		await adapter.remove(tmp).catch(() => undefined);
+	}
+}
+
+/** Keep a copy of an unusable state file so it can be inspected, and stop
+ * it from being read again. */
+export async function quarantineState(
+	app: App,
+	manifestDir: string,
+	stamp: string,
+): Promise<string | null> {
+	const path = `${manifestDir}/${STATE_FILE}`;
+	try {
+		await app.vault.adapter.rename(path, `${path}.${stamp}.bad`);
+		return `${path}.${stamp}.bad`;
+	} catch {
+		return null;
+	}
 }
 
 /** Resolve an Obsidian link target to a vault path via metadataCache. */

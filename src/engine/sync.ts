@@ -42,6 +42,12 @@ export interface EngineDeps extends SyncDeps {
 	/** manifest.id — own plugin dir never syncs. */
 	selfId?: string;
 	isMobile?: boolean;
+	/** Non-null when the persisted state could not be read. A round must
+	 * not plan against a fresh state in that case: an empty base against a
+	 * full remote tree is a 2000-second whole-vault pull, and the save at
+	 * the end of it can be interrupted the same way, which is exactly the
+	 * loop that makes a device "never finish syncing". */
+	stateProblem?: { kind: string; detail: string; bytes: number } | null;
 }
 
 const hex = (id: string): string => id.replace(/-/g, "").toLowerCase();
@@ -53,6 +59,16 @@ export async function runSync(
 	const report = newReport();
 	const state = deps.state;
 	const now = deps.now?.() ?? Date.now();
+	// Refuse to plan against an unreadable base. The alternative is a silent
+	// whole-vault re-pull every round; failing loudly once is the cheaper
+	// outcome and the caller can quarantine + retry deliberately.
+	if (deps.stateProblem && Object.keys(state.entries).length === 0) {
+		report.failed++;
+		report.failures.push(
+			`sync state unreadable (${deps.stateProblem.kind}: ${deps.stateProblem.detail}, ${deps.stateProblem.bytes} bytes) — refused to re-pull the whole vault; the state file was kept for inspection`,
+		);
+		return report;
+	}
 	// snapshots mutate state — snapshot it up front so "cancel" can restore
 	const before = JSON.parse(JSON.stringify(state)) as SyncState;
 
