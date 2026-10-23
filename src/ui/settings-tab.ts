@@ -3,7 +3,12 @@ import { getStrings, setOverriddenLocale } from "../i18n";
 import { testConnection } from "../connection";
 import type { SelectiveConfigSettings } from "../config/filter";
 import { normalizeExcludedFolders } from "../sync/scope";
+import type { ScopeSettings } from "../sync/scope";
+import { addMultiSelect } from "./settings-sections";
 import type NotionHubSyncPlugin from "../main";
+
+/** The five file-kind switches in `ScopeSettings` (notes are always on). */
+type ScopeKey = Exclude<keyof ScopeSettings, "excludedFolders">;
 
 export class NotionHubSettingTab extends PluginSettingTab {
 	constructor(private readonly plugin: NotionHubSyncPlugin) {
@@ -214,32 +219,42 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			);
 
 		// ── sync scope ────────────────────────────────────────
-		containerEl.createEl("h3", { text: strings.settingsScope });
-		containerEl.createEl("p", {
-			cls: "setting-item-description",
-			text: strings.settingsScopeDescription,
-		});
-		const scopCats: Array<["images" | "audio" | "video" | "pdf" | "other", string]> =
-			[
-				["images", strings.settingsScopeImages],
-				["audio", strings.settingsScopeAudio],
-				["video", strings.settingsScopeVideo],
-				["pdf", strings.settingsScopePdf],
-				["other", strings.settingsScopeOther],
-			];
-		for (const [key, label] of scopCats) {
-			const s = new Setting(containerEl).setName(label).addToggle((t) =>
-				t
-					.setValue(this.plugin.settings.scope[key])
-					.onChange(async (value) => {
-						this.plugin.settings.scope[key] = value;
-						await this.plugin.saveSettings();
-					}),
-			);
-			if (key === "other") {
-				s.setDesc(strings.settingsScopeOtherDescription);
-			}
-		}
+		// Five file-type switches on one chip row: notes always sync, so the
+		// only decisions left are these, and they read as one question.
+		new Setting(containerEl)
+			.setName(strings.settingsScope)
+			.setDesc(strings.settingsScopeDescription)
+			.then((s) => {
+				// Chip rows are wider than a toggle: put the controls on their
+				// own line instead of squeezing the description into a column.
+				s.settingEl.addClass("nhs-setting-stacked");
+				addMultiSelect(
+					s.controlEl,
+					[
+						{ key: "images", label: strings.settingsScopeImages },
+						{ key: "audio", label: strings.settingsScopeAudio },
+						{ key: "video", label: strings.settingsScopeVideo },
+						{ key: "pdf", label: strings.settingsScopePdf },
+						{
+							key: "other",
+							label: strings.settingsScopeOther,
+							title: strings.settingsScopeOtherDescription,
+						},
+					],
+					{
+						isOn: (k) => this.plugin.settings.scope[k as ScopeKey],
+						set: (k, on) => {
+							this.plugin.settings.scope[k as ScopeKey] = on;
+						},
+						commit: () => this.plugin.saveSettings(),
+					},
+					{
+						selectAll: strings.settingsSelectAll,
+						selectNone: strings.settingsSelectNone,
+					},
+				);
+			});
+
 		new Setting(containerEl)
 			.setName(strings.settingsExcludedFolders)
 			.setDesc(strings.settingsExcludedFoldersDescription)
@@ -295,6 +310,9 @@ export class NotionHubSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		// Eight categories on one chip row — same reason as the file types.
+		// The community-data warning moves to the row description: a chip has
+		// nowhere to put a paragraph, and it matters only while that chip is on.
 		const cats: Array<[keyof SelectiveConfigSettings, string]> = [
 			["app", strings.configCatApp],
 			["appearance", strings.configCatAppearance],
@@ -305,26 +323,39 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			["communityPlugin", strings.configCatCommunityPlugin],
 			["communityPluginData", strings.configCatCommunityPluginData],
 		];
-		for (const [key, label] of cats) {
-			const s = new Setting(containerEl).setName(label).addToggle(
-				(toggle) =>
-					toggle
-						.setValue(this.plugin.settings.configSync[key])
-						.onChange(async (value) => {
-							this.plugin.settings.configSync[key] = value;
-							await this.plugin.saveSettings();
-							if (key === "communityPluginData") {
-								this.display();
-							}
-						}),
-			);
-			if (
-				key === "communityPluginData" &&
-				this.plugin.settings.configSync.communityPluginData
-			) {
-				s.setDesc(strings.configCommunityDataWarning);
-			}
-		}
+		const catSetting = new Setting(containerEl)
+			.setName(strings.settingsConfigSyncCategories)
+			.then((s) => s.settingEl.addClass("nhs-setting-stacked"));
+		// The warning is a sentence, not a chip: show it only while the chip it
+		// is about is on, and collapse the empty desc row instead of leaving a
+		// blank line in the settings list.
+		const paintCatDesc = (): void => {
+			const warn = this.plugin.settings.configSync.communityPluginData;
+			catSetting.setDesc(warn ? strings.configCommunityDataWarning : "");
+			catSetting.descEl.toggleClass("nhs-desc-empty", !warn);
+		};
+		addMultiSelect(
+			catSetting.controlEl,
+			cats.map(([key, label]) => ({ key, label })),
+			{
+				isOn: (k) =>
+					this.plugin.settings.configSync[
+						k as keyof SelectiveConfigSettings
+					],
+				set: (k, on) => {
+					this.plugin.settings.configSync[
+						k as keyof SelectiveConfigSettings
+					] = on;
+					paintCatDesc();
+				},
+				commit: () => this.plugin.saveSettings(),
+			},
+			{
+				selectAll: strings.settingsSelectAll,
+				selectNone: strings.settingsSelectNone,
+			},
+		);
+		paintCatDesc();
 
 		new Setting(containerEl).addButton((button) =>
 			button

@@ -39,6 +39,7 @@ export interface I18nStrings {
 	settingsFullAuditHoursDescription: string;
 	settingsConfigSync: string;
 	settingsConfigSyncDescription: string;
+	settingsConfigSyncCategories: string;
 	configCatApp: string;
 	configCatAppearance: string;
 	configCatAppearanceData: string;
@@ -233,6 +234,9 @@ export interface I18nStrings {
 	settingsScopePdf: string;
 	settingsScopeOther: string;
 	settingsScopeOtherDescription: string;
+	/** Bulk chip label: turn every option on / off. */
+	settingsSelectAll: string;
+	settingsSelectNone: string;
 	settingsExcludedFolders: string;
 	settingsExcludedFoldersDescription: string;
 	settingsExcludedFoldersPlaceholder: string;
@@ -279,6 +283,7 @@ const EN_STRINGS: I18nStrings = {
 	settingsConfigSync: "Sync Obsidian settings",
 	settingsConfigSyncDescription:
 		"Sync selected .obsidian config files through Notion (per device).",
+	settingsConfigSyncCategories: "Categories to sync",
 	configCatApp: "App settings",
 	configCatAppearance: "Appearance",
 	configCatAppearanceData: "Themes and snippets",
@@ -568,6 +573,8 @@ const EN_STRINGS: I18nStrings = {
 	settingsScopeOther: "Other files",
 	settingsScopeOtherDescription:
 		"Anything Obsidian cannot open (zip, psd, exe…).",
+	settingsSelectAll: "All",
+	settingsSelectNone: "None",
 	settingsExcludedFolders: "Excluded folders",
 	settingsExcludedFoldersDescription:
 		"One folder per line, relative to the vault root. Nothing inside them is ever synced.",
@@ -613,6 +620,7 @@ const ZH_CN_STRINGS: I18nStrings = {
 	settingsConfigSync: "同步 Obsidian 设置",
 	settingsConfigSyncDescription:
 		"通过 Notion 同步选定的 .obsidian 配置文件（按设备生效）。",
+	settingsConfigSyncCategories: "同步的类别",
 	configCatApp: "应用设置",
 	configCatAppearance: "外观",
 	configCatAppearanceData: "主题与代码片段",
@@ -876,6 +884,8 @@ const ZH_CN_STRINGS: I18nStrings = {
 	settingsScopeOther: "其他文件",
 	settingsScopeOtherDescription:
 		"Obsidian 无法打开的文件（zip、psd、exe 等）。",
+	settingsSelectAll: "全选",
+	settingsSelectNone: "全不选",
 	settingsExcludedFolders: "排除的文件夹",
 	settingsExcludedFoldersDescription:
 		"每行一个，相对仓库根目录。这些文件夹内的内容永远不会被同步。",

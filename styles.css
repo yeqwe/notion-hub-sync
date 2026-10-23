@@ -884,3 +884,79 @@
 		animation: none;
 	}
 }
+
+/* ---- settings: multi-select chip rows (nhs- prefix) ----
+   One row of toggle chips replaces a stack of single-toggle setting rows.
+   A chip is a real <button> with aria-pressed, so keyboard focus and screen
+   readers work without extra markup. Wraps on mobile, where a settings pane
+   is one column. */
+.nhs-multiselect {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	justify-content: flex-end;
+	max-width: 100%;
+}
+
+.nhs-chip {
+	font-size: var(--font-ui-smaller);
+	padding: 3px 10px;
+	border-radius: 12px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
+	color: var(--text-muted);
+	cursor: pointer;
+	line-height: 1.6;
+	transition:
+		color 0.15s ease,
+		background 0.15s ease,
+		border-color 0.15s ease;
+}
+
+.nhs-chip:hover {
+	border-color: var(--interactive-accent);
+	color: var(--text-normal);
+}
+
+.nhs-chip.is-on {
+	background: var(--interactive-accent);
+	border-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.nhs-chip:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 1px;
+}
+
+/* bulk chip reads as a link, not a state: no fill even when "is-on" */
+.nhs-chip-bulk {
+	border-style: dashed;
+	background: transparent;
+	color: var(--text-faint);
+}
+
+.nhs-chip-bulk:hover {
+	color: var(--text-normal);
+}
+
+/* an empty description would still occupy a line in the setting row */
+.setting-item-description.nhs-desc-empty {
+	display: none;
+}
+
+/* a chip row needs the full width; the description sits above it instead of
+   competing for a second column */
+.nhs-setting-stacked.setting-item {
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 6px;
+}
+
+.nhs-setting-stacked .setting-item-control {
+	width: 100%;
+}
+
+.nhs-setting-stacked .nhs-multiselect {
+	justify-content: flex-start;
+}
