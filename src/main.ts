@@ -250,6 +250,28 @@ export default class NotionHubSyncPlugin extends Plugin {
 				getState: () => this.state,
 				getVaultIO: () => this.io,
 				configDir: () => this.app.vault.configDir,
+				isSyncing: () => this.syncing,
+				/** A failed auto round still ENDED. Without this the interval
+				 * check (now - lastSyncAt) sees a stale clock and fires again on
+				 * the next minute tick, forever. Written to state only, so the
+				 * panel's "last sync" keeps naming the last COMPLETED round. */
+				onRoundEnd: (at) => {
+					const st = this.state;
+					if (!st) return;
+					st.lastRoundAt = at;
+					void saveState(
+						this.app,
+						this.manifest.dir ?? "",
+						st,
+					).catch(() => undefined);
+				},
+				onError: (err) => {
+					const msg = err instanceof Error ? err.message : String(err);
+					this.syncLog.error(getStrings().logRoundFailed(msg));
+					void this.syncLog.flush();
+					this.setSyncing(false);
+					this.updateStatus();
+				},
 				/** Manual rounds stay available while paused — "pause" stops the
 				 * automatic ones only. */
 				request: async (opts) => {

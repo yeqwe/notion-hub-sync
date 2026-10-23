@@ -151,7 +151,19 @@ export class ObsidianVaultIO implements VaultIO {
 			return;
 		}
 		await this.mkdirp(parentDir(path));
-		await this.app.vault.createFolder(path).catch(() => undefined);
+		// The folder we are about to create is OURS. Register it first, or the
+		// `create` event reaches the auto-sync listener as a user change and
+		// schedules another round off the back of this one 鈥?on a pull that
+		// creates a directory, every round would queue the next.
+		this.writes.expect(path, path);
+		try {
+			await this.app.vault.createFolder(path);
+		} catch {
+			// Already there (a race with the user, or with another action): no
+			// event will fire, so drop the expectation instead of letting it
+			// swallow a real user create of the same path later.
+			this.writes.forget(path, path);
+		}
 	}
 
 	async exists(path: string): Promise<boolean> {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	autoSyncAllowed,
 	autoSyncIgnoresPath,
+	lastRoundEnd,
 	wireAutoSync,
 	type AutoSyncHooks,
 	type AutoSyncHost,
@@ -55,17 +56,20 @@ function harness(overrides?: Partial<AutoSyncHooks>) {
 	>();
 	const state = emptyState("r");
 	state.lastSyncAt = 1000;
+	/** rounds that ended, in order (success AND failure). */
+	const roundEnds: number[] = [];
+	const errors: unknown[] = [];
 	const writes = new RenameTracker();
 	const hooks: AutoSyncHooks = {
 		getSettings: () => settings,
 		getState: () => state,
 		getVaultIO: () => ({ writes }) as never,
 		configDir: () => ".obsidian",
-		request: async (opts) => {
-			calls.push("request");
-			forceAudit.push(opts?.forceAudit ?? false);
-			return newReport();
+		onRoundEnd: (at) => {
+			roundEnds.push(at);
+			state.lastRoundAt = at; // what main.ts does
 		},
+		onError: (err) => errors.push(err),
 		setTimeoutFn: (cb) => {
 			const id = nextTimer++;
 			timers.set(id, cb);
@@ -78,6 +82,14 @@ function harness(overrides?: Partial<AutoSyncHooks>) {
 		},
 		now: () => 1_000_000,
 		...overrides,
+		// last, so an override cannot bypass the call recording
+		request: async (opts) => {
+			calls.push("request");
+			forceAudit.push(opts?.forceAudit ?? false);
+			return overrides?.request
+				? overrides.request(opts)
+				: newReport();
+		},
 	};
 	const host: AutoSyncHost = {
 		registerEvent: () => {},
@@ -102,6 +114,8 @@ function harness(overrides?: Partial<AutoSyncHooks>) {
 		state,
 		writes,
 		forceAudit,
+		roundEnds,
+		errors,
 		runInterval: () => intervalCb?.(),
 	};
 }
@@ -170,12 +184,111 @@ describe("wireAutoSync", () => {
 		expect(h.forceAudit).toEqual([false]);
 	});
 
-	it("the force flag is consumed by the round it triggered", () => {
+	it("the force flag is consumed by the round it triggered", async () => {
 		const h = harness();
 		h.vaultCallbacks.get("rename")!("New", "Old", true);
 		h.fireTimer();
+		await Promise.resolve();
 		h.vaultCallbacks.get("modify")!("a.md");
 		h.fireTimer();
+		await Promise.resolve();
 		expect(h.forceAudit).toEqual([true, false]);
+	});
+});
+
+describe("no self-feeding rounds", () => {
+	// The reported symptom: an interval is configured, yet the device syncs
+	// continuously. Both causes below are about a round that is still running
+	// or that failed, being treated as "time to start another".
+
+	it("a slow round does not chain into another one", async () => {
+		// A round longer than the interval leaves lastSyncAt stale for its
+		// whole duration. Every minute tick used to fire again and fold into
+		// a pending round, so the next round started the instant this one
+		// finished 闁?forever.
+		let release!: () => void;
+		const gate = new Promise<void>((r) => (release = r));
+		const h = harness({
+			request: async () => {
+				await gate;
+				return newReport();
+			},
+		});
+		h.state.lastSyncAt = 0; // long overdue
+		h.vaultCallbacks.get("modify")!("a.md");
+		h.fireTimer();
+		await Promise.resolve();
+		expect(h.calls.length).toBe(1);
+		// ticks arrive while the round is in flight
+		h.runInterval();
+		h.runInterval();
+		expect(h.calls.length).toBe(1);
+		release();
+		await Promise.resolve();
+		await Promise.resolve();
+	});
+
+	it("a failing round still ends, so the clock advances", async () => {
+		// A rejected request is an async rejection: the settle path runs in a
+		// microtask, so the assertions have to await it too.
+		const h = harness({
+			request: async () => {
+				throw new Error("boom");
+			},
+		});
+		h.state.lastSyncAt = 0;
+		h.vaultCallbacks.get("modify")!("a.md");
+		h.fireTimer();
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(h.errors.length).toBe(1); // surfaced, not swallowed
+		expect(h.roundEnds).toEqual([1_000_000]); // clock advanced
+		// and the next tick no longer sees an overdue interval
+		h.runInterval();
+		expect(h.calls.length).toBe(1);
+	});
+
+	it("edits during a round do not stack a debounce timer", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((r) => (release = r));
+		const h = harness({
+			request: async () => {
+				await gate;
+				return newReport();
+			},
+		});
+		h.vaultCallbacks.get("modify")!("a.md");
+		h.fireTimer();
+		await Promise.resolve();
+		expect(h.calls.length).toBe(1);
+		h.vaultCallbacks.get("modify")!("b.md");
+		expect(h.timers.size).toBe(0);
+		release();
+		await Promise.resolve();
+		await Promise.resolve();
+	});
+
+	it("a round started by a command also blocks the triggers", () => {
+		let syncing = true;
+		const h = harness({ isSyncing: () => syncing });
+		h.state.lastSyncAt = 0;
+		h.runInterval();
+		expect(h.calls).toEqual([]);
+		syncing = false;
+		h.runInterval();
+		expect(h.calls).toEqual(["request"]);
+	});
+});
+
+describe("lastRoundEnd", () => {
+	it("prefers the round-end clock, falls back to lastSyncAt", () => {
+		const st = emptyState("r");
+		expect(lastRoundEnd(st)).toBeUndefined();
+		st.lastSyncAt = 10;
+		expect(lastRoundEnd(st)).toBe(10);
+		st.lastRoundAt = 20; // a failed round after it
+		expect(lastRoundEnd(st)).toBe(20);
+		expect(lastRoundEnd(null)).toBeUndefined();
 	});
 });

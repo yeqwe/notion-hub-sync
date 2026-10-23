@@ -63,10 +63,31 @@ export interface AutoSyncHooks {
 	onChange?(path: string): void;
 	/** called with each auto round's report (silent handling lives in main). */
 	onReport?(report: SyncReport): void;
+	/** called when an automatic round REJECTED (token, network, a write that
+	 * could not be verified). Without it a failed round is a silent no-op in
+	 * the panel, which is exactly the state where "sync keeps running" is
+	 * impossible to diagnose. */
+	onError?(err: unknown): void;
+	/** Host-side "a round is in flight" flag. The trigger side keeps its own
+	 * flag; this one covers rounds started by a COMMAND, which the triggers
+	 * must not pile a second round onto. */
+	isSyncing?(): boolean;
+	/** Persist a round's end time even when it FAILED. `state.lastSyncAt` is
+	 * written by a completed round only, so without this hook a failing
+	 * round never advances the clock 鈥?and the interval check, which reads
+	 * `now - lastSyncAt`, fires again on the next minute tick. Forever. */
+	onRoundEnd?(at: number): void;
 	setTimeoutFn?(cb: () => void, ms: number): number;
 	clearTimeoutFn?(id: number): void;
 	setIntervalFn?(cb: () => void, ms: number): number;
 	now?(): number;
+}
+
+/** When the last round ended, whatever its outcome. `lastSyncAt` only
+ * advances on a completed round, so gating on it makes a device that keeps
+ * failing retry on every minute tick; `lastRoundAt` is the honest clock. */
+export function lastRoundEnd(state: SyncState | null): number | undefined {
+	return state?.lastRoundAt ?? state?.lastSyncAt;
 }
 
 /** Auto triggers require a completed manual sync on this device and that
@@ -114,18 +135,47 @@ export function wireAutoSync(
 	 * debounce window. Consumed by the round it triggers. */
 	let pendingForceAudit = false;
 
+	/** One round at a time, as seen by the TRIGGERS.
+	 *
+	 * SyncRunner already coalesces concurrent requests, but that is not enough
+	 * here: the interval check reads `now - lastSyncAt`, and a round that takes
+	 * longer than the interval leaves the clock stale for its whole duration, so
+	 * every minute tick fires again and folds into a pending round. The result
+	 * is a device that never stops syncing. The flag is cleared in the promise
+	 * tail, so a rejected round releases it too. */
+	let running = false;
+	const busy = (): boolean => running || hooks.isSyncing?.() === true;
+
 	const fire = () => {
+		if (busy()) return;
 		if (!autoSyncAllowed(hooks.getSettings(), hooks.getState())) return;
 		const forceAudit = pendingForceAudit;
 		pendingForceAudit = false;
+		running = true;
 		void hooks
 			.request(forceAudit ? { forceAudit: true } : undefined)
-			.then((r) => hooks.onReport?.(r));
+			.then(
+				(r) => {
+					// A completed round already stamped `lastSyncAt` itself.
+					running = false;
+					hooks.onReport?.(r);
+				},
+				(err: unknown) => {
+					// A round that threw still ENDED. Not advancing the clock here
+					// is what turned one failure into a round every minute.
+					running = false;
+					hooks.onRoundEnd?.(now());
+					hooks.onError?.(err);
+				},
+			);
 	};
 
 	let timer: number | null = null;
 	const schedule = () => {
 		if (!autoSyncAllowed(hooks.getSettings(), hooks.getState())) return;
+		// Edits made while a round runs are picked up by the next round; the
+		// debounce timer must not stack a second one on top of it.
+		if (busy()) return;
 		if (timer !== null) clearTimeoutFn(timer);
 		timer = setTimeoutFn(() => {
 			timer = null;
@@ -168,7 +218,8 @@ export function wireAutoSync(
 			const s = hooks.getSettings();
 			const min = s.autoSyncIntervalMinutes;
 			if (min <= 0) return;
-			const last = hooks.getState()?.lastSyncAt;
+			if (busy()) return; // a round longer than the interval must not chain
+			const last = lastRoundEnd(hooks.getState());
 			if (last === undefined) return;
 			if (now() - last >= min * 60_000) fire();
 		}, 60_000),
@@ -184,7 +235,8 @@ export function wireAutoSync(
 		host.registerDomEvent(document, "visibilitychange", () => {
 			if (document.hidden || !hooks.getSettings().syncOnForeground)
 				return;
-			const last = hooks.getState()?.lastSyncAt;
+			if (busy()) return;
+			const last = lastRoundEnd(hooks.getState());
 			if (last === undefined || now() - last <= 60_000) return;
 			fire();
 		});

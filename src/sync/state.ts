@@ -63,6 +63,12 @@ export interface SyncState {
 	renameHints?: RenameHint[];
 	/** ms epoch of the last successful round (gates auto-sync). */
 	lastSyncAt?: number;
+	/** ms epoch the last round ENDED, success or failure. Read by the
+	 * interval/foreground gates: `lastSyncAt` only advances on a completed
+	 * round, so a device stuck on a failing round would otherwise retry on
+	 * every minute tick. Kept separate so the UI can still say when the last
+	 * round actually *succeeded*. */
+	lastRoundAt?: number;
 	/** Page ids known to be outside our tree — skip parent-chain probes
 	 * (FIFO, capped at 2000). */
 	outsideTree?: string[];
