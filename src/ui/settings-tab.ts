@@ -2,6 +2,7 @@ import { Notice, PluginSettingTab, Setting } from "obsidian";
 import { getStrings, setOverriddenLocale } from "../i18n";
 import { testConnection } from "../connection";
 import type { SelectiveConfigSettings } from "../config/filter";
+import { normalizeExcludedFolders } from "../sync/scope";
 import type NotionHubSyncPlugin from "../main";
 
 export class NotionHubSettingTab extends PluginSettingTab {
@@ -209,6 +210,49 @@ export class NotionHubSettingTab extends PluginSettingTab {
 							this.plugin.settings.maxFileSizeMB = n;
 							await this.plugin.saveSettings();
 						}
+					}),
+			);
+
+		// ── sync scope ────────────────────────────────────────
+		containerEl.createEl("h3", { text: strings.settingsScope });
+		containerEl.createEl("p", {
+			cls: "setting-item-description",
+			text: strings.settingsScopeDescription,
+		});
+		const scopCats: Array<["images" | "audio" | "video" | "pdf" | "other", string]> =
+			[
+				["images", strings.settingsScopeImages],
+				["audio", strings.settingsScopeAudio],
+				["video", strings.settingsScopeVideo],
+				["pdf", strings.settingsScopePdf],
+				["other", strings.settingsScopeOther],
+			];
+		for (const [key, label] of scopCats) {
+			const s = new Setting(containerEl).setName(label).addToggle((t) =>
+				t
+					.setValue(this.plugin.settings.scope[key])
+					.onChange(async (value) => {
+						this.plugin.settings.scope[key] = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+			if (key === "other") {
+				s.setDesc(strings.settingsScopeOtherDescription);
+			}
+		}
+		new Setting(containerEl)
+			.setName(strings.settingsExcludedFolders)
+			.setDesc(strings.settingsExcludedFoldersDescription)
+			.addTextArea((area) =>
+				area
+					.setPlaceholder(strings.settingsExcludedFoldersPlaceholder)
+					.setValue(
+						this.plugin.settings.scope.excludedFolders.join("\n"),
+					)
+					.onChange(async (value) => {
+						this.plugin.settings.scope.excludedFolders =
+							normalizeExcludedFolders(value.split("\n"));
+						await this.plugin.saveSettings();
 					}),
 			);
 

@@ -9,6 +9,8 @@ import type { SyncDeps, SyncReport } from "../sync/deps";
 import { newReport } from "../sync/deps";
 import type { SyncEntry, SyncState } from "../sync/state";
 import { makeLinks } from "../sync/push";
+import { makeScope, type Scope, type ScopeSettings } from "../sync/scope";
+import type { BlockedPath } from "../sync/blocked";
 import { plan } from "./plan";
 import type { BaseNode, ParentRef } from "./types";
 import { snapshotLocal } from "./local";
@@ -27,6 +29,8 @@ export interface EngineSettings {
 	maxFileSizeMB?: number;
 	/** prompt before this many local deletions in one round (0 = off). */
 	deleteGuardThreshold?: number;
+	/** which paths this device syncs at all (absent → everything). */
+	scope?: ScopeSettings;
 }
 
 export interface EngineDeps extends SyncDeps {
@@ -99,16 +103,27 @@ export async function runSync(
 	// 1. local snapshot — remember how many rename hints existed now so a
 	// hint recorded *during* the round survives to the next one.
 	const hintCount = state.renameHints?.length ?? 0;
+	// The one scope instance for this round: scanner, remote evaluator and
+	// planner all consult it, so "what is in scope" cannot change halfway.
+	const scope: Scope | null = deps.engine.scope
+		? makeScope(deps.engine.scope)
+		: null;
+	if (scope) deps = { ...deps, scope };
+	const skipIds = new Set<string>();
+	if (scope) {
+		for (const [id, e] of Object.entries(state.entries)) {
+			if (!scope.allows(e.path, e.kind === "folder")) skipIds.add(id);
+		}
+	}
 	deps.event?.({ t: "phase", phase: "scanLocal" });
-	const localSnap = await snapshotLocal(deps.vault, state, (d, t, p) =>
-		deps.event?.({
-			t: "scan",
-			stage: "local",
-			done: d,
-			total: t,
-			label: p,
-		}),
+	const localSnap = await snapshotLocal(
+		deps.vault,
+		state,
+		(d, t, p) =>
+			deps.event?.({ t: "scan", stage: "local", done: d, total: t, label: p }),
+		scope ?? undefined,
 	);
+	report.blocked.push(...localSnap.blocked);
 
 	// 2+3. remote snapshot (journal read inside)
 	const links = makeLinks(deps);
@@ -176,6 +191,10 @@ export async function runSync(
 				return d ? `${d}/${name}` : name;
 			},
 			keepLocal,
+			skipIds,
+			skipPath: scope
+				? (p, isDir) => !scope.allows(p, isDir)
+				: undefined,
 		});
 	let actions = planActions();
 
@@ -236,6 +255,21 @@ export async function runSync(
 		newRemoteFolders: new Map(),
 		recreated: new Map(),
 	};
+	// Name the phase the round is actually in. "Applying 12 changes" while a
+	// 200 MB download runs looks like a hang; the phase tells them apart.
+	const pulls = actions.some(
+		(a) =>
+			a.type === "pullContent" ||
+			a.type === "pullNew" ||
+			a.type === "merge" ||
+			a.type === "conflictCopy",
+	);
+	const pushes = actions.some(
+		(a) => a.type === "pushContent" || a.type === "pushNew",
+	);
+	if (pulls) deps.event?.({ t: "phase", phase: "download" });
+	else if (pushes) deps.event?.({ t: "phase", phase: "upload" });
+	else deps.event?.({ t: "phase", phase: "apply" });
 	await applyActions(actions, ctx);
 
 	// 5b. config-dir sync (after main apply, before journal write)
@@ -295,6 +329,7 @@ export async function runSync(
 		failures: report.failures.slice(0, 20),
 		warnings: report.warnings.slice(0, 20),
 		conflictCopies: report.conflictCopies.slice(0, 20),
+		blocked: report.blocked.slice(0, 50),
 	};
 	await deps.saveState();
 	return report;

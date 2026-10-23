@@ -75,6 +75,8 @@ export interface SyncState {
 		failures: string[];
 		warnings: string[];
 		conflictCopies: string[];
+		/** Per-path block reasons (out of scope paths are not listed here). */
+		blocked?: import("./blocked").BlockedPath[];
 	};
 	entries: Record<string, SyncEntry>;
 }

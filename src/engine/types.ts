@@ -55,6 +55,18 @@ export interface PlanInput {
 	/** ids the user chose to keep locally despite remote deletion —
 	 * evaluated as if the local side changed (→ recreateRemote). */
 	keepLocal?: Set<string>;
+	/** ids outside this device's sync scope (excluded folder or a switched-
+	 * off file type). They get NO action at all — not a push, not a pull and
+	 * above all not a trash: "not in scope" is not "deleted", and treating
+	 * it as such would wipe the other side. Applied here rather than by each
+	 * caller so a path cannot slip through one rule and not another. */
+	skipIds?: Set<string>;
+	/** Same idea for items whose id this device has never seen (a page
+	 * created remotely this round). Their path is the only thing available,
+	 * so scope is tested against the full path instead of the id. `isDir`
+	 * comes from the item's kind — a folder has no extension and would
+	 * otherwise be classified as "other" and dropped. */
+	skipPath?: (path: string, isDir: boolean) => boolean;
 }
 
 export type Action =

@@ -34,11 +34,13 @@ function duplicateAt(
 	base: Record<string, BaseNode>,
 	local: Record<string, Side>,
 	remote: Record<string, Side>,
+	skip?: Set<string>,
 ): { dead: string[]; alive: string[] } {
 	const dead: string[] = [];
 	const alive: string[] = [];
 	const groups = new Map<string, string[]>();
 	for (const [id, b] of Object.entries(base)) {
+		if (skip?.has(id)) continue;
 		const le = local[id];
 		if (!le || le.deleted) continue;
 		const key = `${b.kind}\u0000${parentKey(le.parent)}\u0000${le.name}`;
@@ -144,9 +146,27 @@ function finalPlacement(
 }
 
 export function plan(input: PlanInput): Action[] {
-	const { base, local, remote, localAdded, remoteAdded, pathOf } = input;
+	const { base, local, remote, pathOf } = input;
+	// Out-of-scope entries and any added item that belongs to them are dropped
+	// before any rule runs, so no rule can emit an action for a path this
+	// device does not sync.
+	const skip = input.skipIds ?? new Set<string>();
+	const localAdded = input.localAdded.filter((a) => !skip.has(a.path));
+	// Remote additions have no id this device knows, so scope is tested on
+	// their reconstructed path instead (with the item's own shape: a folder
+	// has no extension and would otherwise read as "other").
+	const remoteAdded = input.skipPath
+		? input.remoteAdded.filter(
+				(r) =>
+					!input.skipPath!(
+						pathOf(r.parent, r.name),
+						r.kind === "folder",
+					),
+			)
+		: input.remoteAdded;
 	const evals = new Map<string, { le: Eval; re: Eval }>();
 	for (const [id, b] of Object.entries(base)) {
+		if (skip.has(id)) continue;
 		const le = evalSide(local[id], b);
 		const re = evalSide(remote[id], b);
 		// kept-by-user ids count as locally changed → recreated remotely
@@ -174,6 +194,7 @@ export function plan(input: PlanInput): Action[] {
 	// removed, so pulling a page back onto it would resurrect the folder.
 	const takenByBase = new Map<string, string>();
 	for (const [id, b] of Object.entries(base)) {
+		if (skip.has(id)) continue;
 		const le = local[id];
 		if (le === undefined) continue; // not evaluated this round
 		const key = le.deleted
@@ -341,7 +362,7 @@ export function plan(input: PlanInput): Action[] {
 	// ----- folder survival check (for the deletion guard) -----
 	const folderNeeded = new Set<string>();
 	for (const [id, b] of Object.entries(base)) {
-		if (b.kind !== "folder") continue;
+		if (b.kind !== "folder" || skip.has(id)) continue;
 		const { le, re } = evals.get(id)!;
 		const wantsDelete = le.deleted !== re.deleted;
 		if (!wantsDelete) continue;
@@ -350,6 +371,7 @@ export function plan(input: PlanInput): Action[] {
 	const stillNeeded = new Set<string>();
 	if (folderNeeded.size > 0) {
 		for (const [id, b] of Object.entries(base)) {
+			if (skip.has(id)) continue;
 			const { le, re } = evals.get(id)!;
 			const fp = finalPlacement(id, b, le, re);
 			if (fp.alive && fp.parentKey) {
@@ -364,7 +386,7 @@ export function plan(input: PlanInput): Action[] {
 	// Decided BEFORE the per-id loop so a duplicate never reaches it: letting
 	// the loop see one would produce trashLocal for a directory the surviving
 	// entry still needs.
-	const dups = duplicateAt(base, local, remote);
+	const dups = duplicateAt(base, local, remote, skip);
 	// a dead duplicate's page is gone: drop the entry. An alive one is a real
 	// second page → trash it (its twin keeps the place).
 	const dupForgets: Action[] = dups.dead.map((id) => ({ type: "forget", id }));
@@ -406,6 +428,7 @@ export function plan(input: PlanInput): Action[] {
 	const depthOf = makeDepth(base);
 
 	for (const [id, b] of Object.entries(base)) {
+		if (skip.has(id)) continue;
 		const { le, re } = evals.get(id)!;
 		const isFolder = b.kind === "folder";
 

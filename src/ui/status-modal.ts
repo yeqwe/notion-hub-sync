@@ -4,10 +4,10 @@
 
 import { App, ButtonComponent, Modal, Platform, TFile } from "obsidian";
 
-import { getStrings } from "../i18n";
+import { blockedLabels, getStrings } from "../i18n";
 import type { SyncState } from "../sync/state";
-
-const CONFLICT_RE = / \(conflict [0-9a-f-]+ \d{4}-\d{2}-\d{2}T[^)]*\)/;
+import { summarizeBlocked } from "../sync/blocked";
+import { CONFLICT_COPY_RE } from "../sync/paths";
 
 export interface StatusModalDeps {
 	app: App;
@@ -20,16 +20,14 @@ export function openStatusModal(deps: StatusModalDeps): void {
 	new StatusModal(deps).open();
 }
 
-/** Vault paths matching our conflict-copy naming. */
+/** Vault paths matching our conflict-copy naming (shared matcher). */
 export function findConflictCopies(app: App): TFile[] {
-	return app.vault
-		.getFiles()
-		.filter((f) => CONFLICT_RE.test(f.path));
+	return app.vault.getFiles().filter((f) => CONFLICT_COPY_RE.test(f.path));
 }
 
 /** "a/b/x (conflict dev 2026-…).md" → "a/b/x.md". */
 function originalPath(copyPath: string): string {
-	return copyPath.replace(CONFLICT_RE, "");
+	return copyPath.replace(CONFLICT_COPY_RE, "");
 }
 
 class StatusModal extends Modal {
@@ -76,6 +74,34 @@ class StatusModal extends Modal {
 				const ul = contentEl.createEl("ul", { cls: "nhs-status-list" });
 				for (const w of r.warnings) ul.createEl("li", { text: w });
 			}
+		}
+
+		// files that did not sync — previously invisible anywhere in the UI
+		const blocked = this.deps.state?.lastReport?.blocked ?? [];
+		if (blocked.length > 0) {
+			const sum = summarizeBlocked(blocked, blockedLabels(s));
+			contentEl.createEl("div", {
+				cls: "nhs-status-head",
+				text: sum.headline,
+			});
+			const list = contentEl.createEl("ul", { cls: "nhs-status-list" });
+			for (const f of sum.files.slice(0, 20)) {
+				const li = list.createEl("li");
+				li.createSpan({ text: f.path });
+				li.createSpan({
+					cls: "nhs-status-blocked-reason",
+					text: `（${f.label}${f.detail ? `: ${f.detail}` : ""}）`,
+				});
+			}
+			if (sum.files.length > 20) {
+				list.createEl("li", {
+					text: `…+${sum.files.length - 20}`,
+				});
+			}
+			contentEl.createEl("div", {
+				cls: "nhs-status-line",
+				text: s.blockedOthersUnaffected,
+			});
 		}
 
 		// conflict copies in the vault

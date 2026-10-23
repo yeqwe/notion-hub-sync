@@ -204,8 +204,11 @@
 	animation: nhs-spin 1s linear infinite;
 }
 
-.nhs-ribbon-warn::after {
-	content: "";
+/* Real DOM badge, not ::after: mobile renders the ribbon as menu items and
+   drops pseudo-elements, which silently lost this indicator on phones.
+   main.ts reconciles the node (idempotent), so a theme re-render can't
+   leave two dots behind. */
+.nhs-ribbon-badge {
 	position: absolute;
 	top: 4px;
 	right: 4px;
@@ -213,6 +216,11 @@
 	height: 7px;
 	border-radius: 50%;
 	background: var(--color-orange);
+	pointer-events: none;
+}
+
+.nhs-ribbon-paused svg {
+	opacity: 0.55;
 }
 
 /* status modal */
@@ -435,6 +443,84 @@
 	display: grid;
 	grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
 	gap: 6px;
+}
+
+/* Paused: the button stays visible but reads as a state, not an action. */
+.nhs-panel-grid-btn.is-active {
+	border-color: var(--color-orange);
+	color: var(--color-orange);
+}
+
+/* ── pending changes card (git-status style) ─────────────── */
+.nhs-changes-list {
+	max-height: 220px;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+.nhs-change-row {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	padding: 2px 4px;
+	border-radius: 4px;
+	font-size: var(--font-ui-smaller);
+	line-height: 1.5;
+}
+
+.nhs-change-row.is-clickable {
+	cursor: pointer;
+}
+
+.nhs-change-row.is-clickable:hover {
+	background: var(--background-modifier-hover);
+}
+
+/* Mark colours follow git's convention, so the list is readable at a glance
+   to anyone who has used `git status`. */
+.nhs-change-mark {
+	flex: 0 0 auto;
+	width: 1.1em;
+	text-align: center;
+	font-family: var(--font-monospace);
+	font-weight: 600;
+}
+.nhs-change-row.is-new .nhs-change-mark {
+	color: var(--color-green);
+}
+.nhs-change-row.is-modified .nhs-change-mark {
+	color: var(--color-orange);
+}
+.nhs-change-row.is-renamed .nhs-change-mark {
+	color: var(--color-blue);
+}
+.nhs-change-row.is-deleted .nhs-change-mark {
+	color: var(--color-red);
+}
+
+.nhs-change-name {
+	flex: 0 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.nhs-change-dir {
+	flex: 1 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	direction: rtl;
+	text-align: left;
+	opacity: 0.45;
+	font-size: 0.9em;
+}
+
+.nhs-status-blocked-reason {
+	opacity: 0.7;
+	font-size: var(--font-ui-smaller);
 }
 
 .nhs-panel-grid-btn {

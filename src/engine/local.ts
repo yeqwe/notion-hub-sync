@@ -12,6 +12,8 @@ import {
 } from "../sync/vault-io";
 import type { SyncState, SyncEntry } from "../sync/state";
 import { childDirOf } from "../sync/paths";
+import type { BlockedPath } from "../sync/blocked";
+import type { Scope } from "../sync/scope";
 import type { LocalAdded, ParentRef, Side } from "./types";
 
 export interface LocalSnapshot {
@@ -24,6 +26,41 @@ export interface LocalSnapshot {
 	folderIdByPath: Map<string, string>;
 	/** claimed paths (base ids + matched renames). */
 	claimed: Set<string>;
+	/** paths blocked this round (unreadable, case clash, out of scope). */
+	blocked: BlockedPath[];
+}
+
+/**
+ * Paths that differ only by case are ONE file on Windows and on macOS's
+ * default filesystem. Two such paths cannot both exist locally, so a
+ * remote pair would ping-pong overwriting each other forever.
+ *
+ * Both are blocked rather than picking a winner: which one is "right" is
+ * not knowable from here, and silently dropping either loses content.
+ * Case-SENSITIVE filesystems (Linux) are unaffected — there the two paths
+ * are genuinely distinct, so the check only fires when both exist... which
+ * they then legitimately can. The guard is therefore limited to *remote*
+ * entries whose local twins collide, which is the only shape that breaks
+ * a case-insensitive disk.
+ */
+export function findCaseConflicts(
+	paths: readonly string[],
+): Map<string, string[]> {
+	const byLower = new Map<string, string[]>();
+	for (const p of paths) {
+		const key = p.toLowerCase();
+		const list = byLower.get(key);
+		if (list) list.push(p);
+		else byLower.set(key, [p]);
+	}
+	const out = new Map<string, string[]>();
+	for (const list of byLower.values()) {
+		if (list.length < 2) continue;
+		for (const p of list) {
+			out.set(p, list.filter((o) => o !== p));
+		}
+	}
+	return out;
 }
 
 /** Apply rename hints in order; folder hints remap path prefixes. */
@@ -48,16 +85,35 @@ export async function snapshotLocal(
 	state: SyncState,
 	/** throttled callback while hashing files (done = files hashed). */
 	onProgress?: (done: number, total: number, path: string) => void,
+	/** paths this device syncs at all; absent → everything. */
+	scope?: Scope,
 ): Promise<LocalSnapshot> {
 	const hints = state.renameHints ?? [];
-	const { files, folders } = await vault.list();
+	const raw = await vault.list();
+	const inScope = (p: string, isDir: boolean): boolean =>
+		(!scope || scope.allows(p, isDir)) && isSyncablePath(p);
+	const files = raw.files.filter((f) => inScope(f.path, false));
+	const folders = raw.folders.filter((f) => inScope(f, true));
 	const fileByPath = new Map<string, VaultFile>();
 	for (const f of files) {
-		if (isSyncablePath(f.path)) fileByPath.set(f.path, f);
+		fileByPath.set(f.path, f);
 	}
-	const folderSet = new Set(
-		folders.filter((f) => isSyncablePath(f) && f !== ""),
-	);
+	const folderSet = new Set(folders.filter((f) => f !== ""));
+
+	// Case-clashing local twins: both blocked, neither pushed nor deleted.
+	const blocked: BlockedPath[] = [];
+	const caseConflicts = findCaseConflicts([
+		...fileByPath.keys(),
+		...folderSet,
+	]);
+	for (const [path, twins] of caseConflicts) {
+		blocked.push({
+			path,
+			reason: "caseConflict",
+			detail: twins.join(", "),
+		});
+	}
+	const clashing = new Set(caseConflicts.keys());
 
 	// current local path for every base id (rename hints applied)
 	const pathOf = new Map<string, string>();
@@ -109,6 +165,12 @@ export async function snapshotLocal(
 	const claimed = new Set<string>();
 	for (const [id, e] of Object.entries(state.entries)) {
 		const p = pathOf.get(id)!;
+		// Out of scope / case-clashing: do NOT evaluate. An absent evaluation
+		// means "unchanged" to the planner, which is exactly right — this
+		// device neither pushes, pulls, nor deletes the path this round.
+		if ((scope && !scope.allows(p, e.kind === "folder")) || clashing.has(p)) {
+			continue;
+		}
 		if (e.kind === "folder") {
 			local[id] = folderSet.has(p)
 				? {
@@ -146,11 +208,11 @@ export async function snapshotLocal(
 			sha,
 		};
 	}
-
 	// unclaimed files/folders → LocalAdded
 	const localAdded: LocalAdded[] = [];
 	for (const dir of folderSet) {
 		if (claimed.has(dir) || folderIdByPath.has(dir)) continue;
+		if (clashing.has(dir)) continue;
 		// don't claim if some base folder maps to it
 		if ([...pathOf.values()].includes(dir)) continue;
 		// a note's child-page directory has no page of its own
@@ -166,6 +228,7 @@ export async function snapshotLocal(
 	}
 	for (const f of fileByPath.values()) {
 		if (claimed.has(f.path)) continue;
+		if (clashing.has(f.path)) continue;
 		const dir = parentDir(f.path);
 		localAdded.push({
 			path: f.path,
@@ -211,5 +274,5 @@ export async function snapshotLocal(
 		}
 	}
 
-	return { local, localAdded, pathOf, folderIdByPath, claimed };
+	return { local, localAdded, pathOf, folderIdByPath, claimed, blocked };
 }

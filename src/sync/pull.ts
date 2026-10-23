@@ -283,13 +283,57 @@ export async function fetchFileContent(
 		return { bytes: new Uint8Array(), mediaBlockId: null };
 	}
 	const sizeHint = deps.state.entries[pageId]?.localSize;
+	// Refuse before the download starts. Notion reports the size on the block;
+	// a round that pulled a 2 GB attachment just to notice it is over the
+	// limit has already spent the bandwidth (and, on mobile, the memory).
+	const maxMB = (deps as { engine?: { maxFileSizeMB?: number } }).engine
+		?.maxFileSizeMB;
+	const limit = maxMB && maxMB > 0 ? maxMB * 1024 * 1024 : 200 * 1024 * 1024;
+	const declared = blockSize(media);
+	if (declared !== null && declared > limit) {
+		throw new RemoteTooLargeError(pageId, declared, limit);
+	}
 	const data = new Uint8Array(
 		await deps.client.download(url, { sizeHintBytes: sizeHint }),
 	);
+	// The declared size can lie (or be absent); check the bytes too, and let
+	// the caller turn an oversized pull into a `blocked` entry rather than a
+	// silent truncation.
+	if (data.byteLength > limit) {
+		throw new RemoteTooLargeError(pageId, data.byteLength, limit);
+	}
 	return {
 		bytes: data,
 		mediaBlockId: media.id.replace(/-/g, "").toLowerCase(),
 	};
+}
+
+/** Remote content above the configured limit: not downloaded, not deleted. */
+export class RemoteTooLargeError extends Error {
+	constructor(
+		readonly pageId: string,
+		readonly bytes: number,
+		readonly limit: number,
+	) {
+		super(
+			`remote content is ${(bytes / 1024 / 1024).toFixed(1)} MB, above the ${(
+				limit / 1024 / 1024
+			).toFixed(0)} MB limit`,
+		);
+		this.name = "RemoteTooLargeError";
+	}
+}
+
+/** `size` reported on a media block, in bytes; null when the block has none.
+ * Notion puts it under the block's own type key (`file.size` etc.). */
+function blockSize(block: Record<string, unknown>): number | null {
+	const payload = block[block.type as string] as
+		| { size?: unknown }
+		| undefined;
+	const raw = payload?.size;
+	return typeof raw === "number" && Number.isFinite(raw) && raw >= 0
+		? raw
+		: null;
 }
 
 async function pullNote(

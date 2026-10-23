@@ -9,11 +9,14 @@ import { ItemView, setIcon, type WorkspaceLeaf } from "obsidian";
 import { getStrings } from "../i18n";
 import type { LogLevel, SyncLog } from "../sync/sync-log";
 import type { SyncState } from "../sync/state";
+import { statusMark, type PendingChange } from "../sync/changes";
 
 export const SYNC_PANEL_VIEW = "nhs-sync-panel";
 
 /** Render at most this many newest log rows. */
 const MAX_ROWS = 300;
+/** Render at most this many change rows (the card scrolls). */
+const MAX_CHANGES = 200;
 
 type LogFilter = "all" | LogLevel;
 
@@ -21,6 +24,9 @@ export interface SyncPanelDeps {
 	log: SyncLog;
 	getState(): SyncState | null;
 	isSyncing(): boolean;
+	isPaused(): boolean;
+	/** Cached pending-changes list (computed outside the panel). */
+	getChanges(): readonly PendingChange[];
 	/** Open a vault path from a log row (missing → caller notifies). */
 	onOpenPath(path: string): void;
 	onSyncNow(): void;
@@ -28,6 +34,8 @@ export interface SyncPanelDeps {
 	onOpenStatus(): void;
 	onOpenHistory(): void;
 	onDeletedFiles(): void;
+	onTogglePause(): void;
+	onRefreshChanges(): void;
 }
 
 export class SyncPanelView extends ItemView {
@@ -38,6 +46,8 @@ export class SyncPanelView extends ItemView {
 	private statsEl: HTMLElement | null = null;
 	private lastSyncEl: HTMLElement | null = null;
 	private logEl: HTMLElement | null = null;
+	private changesEl: HTMLElement | null = null;
+	private pauseBtn: HTMLElement | null = null;
 	private filter: LogFilter = "all";
 	private unsubscribe: (() => void) | null = null;
 	private logTimer: number | null = null;
@@ -81,6 +91,12 @@ export class SyncPanelView extends ItemView {
 	refresh(): void {
 		this.updateBadge();
 		this.renderSummary();
+		this.updatePauseButton();
+	}
+
+	/** Replace the "pending changes" card's contents. */
+	setChanges(changes: readonly PendingChange[]): void {
+		this.renderChanges(changes);
 	}
 
 	/** Determinate progress: bar % + "done/total · pct%" + label. */
@@ -177,6 +193,15 @@ export class SyncPanelView extends ItemView {
 			s.commandDeletedFiles,
 			() => this.deps.onDeletedFiles(),
 		);
+		// Pause sits last in the grid: it is the least-used action but the
+		// one you look for in a hurry.
+		this.pauseBtn = this.addGridBtn(
+			grid,
+			"pause",
+			s.commandPauseSync,
+			s.commandTogglePause,
+			() => this.deps.onTogglePause(),
+		);
 
 		// ── progress bar ───────────────────────────────────────
 		this.progressEl = root.createDiv({
@@ -205,11 +230,93 @@ export class SyncPanelView extends ItemView {
 		});
 		this.lastSyncEl = syncCard.createDiv();
 
+		// ── pending changes card (git-status style) ──────────
+		this.changesEl = root.createDiv({ cls: "nhs-panel-card-section" });
+
 		// ── log card ───────────────────────────────────────────
 		this.logEl = root.createDiv({ cls: "nhs-panel-card-section" });
 
 		this.refresh();
+		this.renderChanges(this.deps.getChanges());
 		this.renderLog();
+	}
+
+	private updatePauseButton(): void {
+		if (!this.pauseBtn) return;
+		const s = getStrings();
+		const paused = this.deps.isPaused();
+		this.pauseBtn.toggleClass("is-active", paused);
+		this.pauseBtn.setAttribute(
+			"aria-label",
+			paused ? s.commandResumeSync : s.commandPauseSync,
+		);
+		const label = this.pauseBtn.querySelector("span");
+		if (label) {
+			label.setText(paused ? s.commandResumeSync : s.commandPauseSync);
+		}
+	}
+
+	/** "Pending changes" card: one row per path, `git status` marks.
+	 *
+	 * Read-only by design — pushing one file alone would need a second,
+	 * narrower apply path, and the round is cheap enough that "sync now"
+	 * is the honest action. The list exists so a stuck file is *visible*.
+	 */
+	private renderChanges(changes: readonly PendingChange[]): void {
+		const el = this.changesEl;
+		if (!el) return;
+		const s = getStrings();
+		el.empty();
+		const head = el.createDiv({ cls: "nhs-panel-log-header" });
+		head.createEl("p", {
+			cls: "nhs-panel-card-section-title",
+			text: s.changesTitle,
+		});
+		head.createSpan({
+			cls: "nhs-panel-log-count",
+			text: s.changesCount(changes.length),
+		});
+		const refresh = head.createEl("button", {
+			cls: "nhs-log-filter-btn",
+			text: s.changesRefresh,
+			attr: { "aria-label": s.changesRefresh },
+		});
+		refresh.addEventListener("click", () => this.deps.onRefreshChanges());
+
+		const list = el.createDiv({ cls: "nhs-changes-list" });
+		if (changes.length === 0) {
+			list.createEl("p", { cls: "nhs-log-empty", text: s.changesEmpty });
+			return;
+		}
+		const labels: Record<PendingChange["status"], string> = {
+			new: s.changesNew,
+			modified: s.changesModified,
+			renamed: s.changesRenamed,
+			deleted: s.changesDeleted,
+		};
+		for (const c of changes.slice(0, MAX_CHANGES)) {
+			const row = list.createDiv({
+				cls: `nhs-change-row is-${c.status} is-clickable`,
+			});
+			row.setAttribute("title", labels[c.status]);
+			row.setAttribute("aria-label", `${labels[c.status]}: ${c.path}`);
+			row.createSpan({
+				cls: "nhs-change-mark",
+				text: statusMark(c.status),
+			});
+			row.createSpan({ cls: "nhs-change-name", text: c.name });
+			const at = c.path.lastIndexOf("/");
+			if (at > 0) {
+				row.createSpan({ cls: "nhs-change-dir", text: c.path.slice(0, at) });
+			}
+			row.addEventListener("click", () => this.deps.onOpenPath(c.path));
+		}
+		if (changes.length > MAX_CHANGES) {
+			list.createEl("p", {
+				cls: "nhs-log-empty",
+				text: `…+${changes.length - MAX_CHANGES}`,
+			});
+		}
 	}
 
 	private updateBadge(): void {
@@ -390,7 +497,7 @@ export class SyncPanelView extends ItemView {
 		label: string,
 		tooltip: string,
 		onClick: () => void,
-	): void {
+	): HTMLElement {
 		const btn = container.createEl("button", {
 			cls: "nhs-panel-grid-btn",
 			attr: { "aria-label": tooltip },
@@ -398,5 +505,6 @@ export class SyncPanelView extends ItemView {
 		setIcon(btn, iconName);
 		btn.createSpan({ text: label });
 		btn.addEventListener("click", onClick);
+		return btn;
 	}
 }

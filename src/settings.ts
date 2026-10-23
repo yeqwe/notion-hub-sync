@@ -2,6 +2,11 @@ import {
 	defaultConfigSync,
 	type ConfigSyncSettings,
 } from "./config/filter";
+import {
+	defaultScope,
+	normalizeScope,
+	type ScopeSettings,
+} from "./sync/scope";
 
 /**
  * Files re-checked for remote content changes every round.
@@ -32,7 +37,12 @@ export interface NotionHubSettings {
 	historyRetentionDays: number;
 	fullAuditHours: number;
 	configSync: ConfigSyncSettings;
+	/** Which file types / folders sync. Notes always sync. */
+	scope: ScopeSettings;
 	autoSync: boolean;
+	/** Master off-switch for *automatic* rounds. Manual commands still run:
+	 * "pause" means "stop doing this behind my back", not "uninstall". */
+	paused: boolean;
 	autoSyncDebounceSeconds: number;
 	autoSyncIntervalMinutes: number;
 	syncOnStartup: boolean;
@@ -53,7 +63,9 @@ export const DEFAULT_SETTINGS: NotionHubSettings = {
 	historyRetentionDays: 30,
 	fullAuditHours: 6,
 	configSync: defaultConfigSync(),
+	scope: defaultScope(),
 	autoSync: true,
+	paused: false,
 	autoSyncDebounceSeconds: 10,
 	autoSyncIntervalMinutes: 5,
 	syncOnStartup: true,
@@ -61,3 +73,17 @@ export const DEFAULT_SETTINGS: NotionHubSettings = {
 	maxFileSizeMB: 200,
 	deleteGuardThreshold: 10,
 };
+
+/** Merge persisted settings over the defaults, normalizing nested objects
+ * so a key added in a later version cannot arrive undefined. */
+export function mergeSettings(
+	saved: Partial<NotionHubSettings> | null | undefined,
+): NotionHubSettings {
+	const src = saved ?? {};
+	return {
+		...DEFAULT_SETTINGS,
+		...src,
+		configSync: { ...DEFAULT_SETTINGS.configSync, ...(src.configSync ?? {}) },
+		scope: normalizeScope(src.scope),
+	};
+}

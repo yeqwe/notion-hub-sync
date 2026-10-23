@@ -19,6 +19,11 @@ import { newReport } from "./deps";
 
 const DEFAULT_MAX_FILE_BYTES = 200 * 1024 * 1024;
 
+/** Human size for block reasons / log lines. */
+function formatMb(bytes: number): string {
+	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 interface PageMdResponse {
 	object?: string;
 	markdown?: string;
@@ -284,7 +289,11 @@ export async function pushFileContent(
 		maxMB > 0 ? maxMB * 1024 * 1024 : DEFAULT_MAX_FILE_BYTES;
 	if (buf.byteLength > limit) {
 		report.skipped++;
-		report.blocked.push(`${file.path} (too large)`);
+		report.blocked.push({
+			path: file.path,
+			reason: "oversized",
+			detail: `${formatMb(buf.byteLength)} > ${formatMb(limit)}`,
+		});
 		return;
 	}
 	const fileSha = await sha256Hex(buf);

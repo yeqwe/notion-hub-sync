@@ -15,7 +15,7 @@ import {
 	titleFor,
 	makeLinks,
 } from "../sync/push";
-import { fetchNoteContent, fetchFileContent } from "../sync/pull";
+import { fetchNoteContent, fetchFileContent, RemoteTooLargeError } from "../sync/pull";
 import { safeRecordVersion } from "../sync/history";
 import { Semaphore } from "../sync/pool";
 import { merge3Text } from "./merge3";
@@ -425,6 +425,21 @@ export async function applyActions(
 		} catch (err) {
 			ok = false;
 			const msg = err instanceof Error ? err.message : String(err);
+			// A remote file above the limit is a policy decision, not a
+			// failure: it must land in `blocked` (shown to the user with a
+			// reason) rather than inflate the failure count every round.
+			if (err instanceof RemoteTooLargeError) {
+				ctx.report.blocked.push({
+					path,
+					reason: "remoteOversized",
+					detail: msg,
+				});
+				if (countable) {
+					ctx.deps.event?.({ t: "actionFailed", action: action.type, path, error: msg });
+				}
+				done++;
+				return;
+			}
 			if (countable) {
 				ctx.deps.event?.({
 					t: "actionFailed",

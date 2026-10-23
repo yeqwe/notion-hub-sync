@@ -61,8 +61,22 @@ const NEVER_FILES = new Set([
 ]);
 
 /** Our conflict-copy naming: `name (conflict <dev> <ISO>).ext` — local only. */
+/** Conflict copy inside the config dir?
+ *
+ * Deliberately LOOSER than `sync/paths`' matcher, and the asymmetry is
+ * intentional:
+ *
+ *  • inside a vault, a false positive hides a real note from sync — so the
+ *    matcher there demands the exact timestamp shape we write;
+ *  • inside `.obsidian`, a false negative uploads a stale copy as a real
+ *    setting, which the next device then applies. The cost of keeping a
+ *    user's oddly-named config file out of sync is zero; the cost of
+ *    syncing a copy is a broken setting on every device.
+ *
+ * So anything that looks like a copy marker is refused here.
+ */
 export function isConflictCopyName(name: string): boolean {
-	return / \(conflict [^)]*\)\.[^.]+$/.test(name) || / \(conflict [^)]*\)$/.test(name);
+	return / \(conflict [^()]*\)(?:\.[^/.]+)?$/.test(name);
 }
 
 /** Where a local-only config conflict copy is written.

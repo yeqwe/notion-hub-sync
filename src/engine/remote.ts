@@ -18,7 +18,7 @@ import { sanitizeTitle } from "../sync/paths";
 import { walkTree, type Node } from "../sync/pull";
 import { captionSha } from "../sync/upload";
 import type { SyncDeps } from "../sync/deps";
-import { runPool } from "../sync/pool";
+import { runPool, mapConcurrent, CONTENT_BUDGET, sizeOrUnknown } from "../sync/pool";
 import type { SyncEntry } from "../sync/state";
 import type { ParentRef, RemoteAdded, Side } from "./types";
 import { readJournal } from "./journal";
@@ -324,9 +324,25 @@ export async function snapshotRemote(
 			label,
 		});
 	};
-	await runPool([...candidates], 3, async (id) => {
+	// Byte budget, not item count: "3 at a time" is fine for 1 KB notes and
+	// fatal for three 200 MB videos (600 MB of live buffers on a phone).
+	const budget = {
+		sizeOf: (id: string) => sizeOrUnknown(state.entries[id]?.localSize),
+		budgetBytes: deps.isMobile
+			? CONTENT_BUDGET.mobile
+			: CONTENT_BUDGET.desktop,
+	};
+	await mapConcurrent(
+		[...candidates],
+		3,
+		async (id) => {
 		const entry = state.entries[id];
 		evalTick(id, entry?.path ?? id);
+		// Out of scope: never evaluated, so it stays "unchanged" for the
+		// planner and nothing is downloaded, pushed or deleted for it.
+		if (deps.scope && entry && !deps.scope.allows(entry.path, entry.kind === "folder")) {
+			return;
+		}
 		if (remote[id]?.deleted === true) return; // already known gone
 		// Round-robin files: the children call 404s on trashed pages
 		// (verified live) — skip the GET /pages entirely.
@@ -424,7 +440,9 @@ export async function snapshotRemote(
 		// here is it safe to tell the search gate "this page is evaluated".
 		if (info.lastEdited) entry.remoteEdited = info.lastEdited;
 		entry.checkedAt = opts.now;
-	});
+		},
+		budget,
+	);
 
 	// ---- remote added: audit-discovered + candidate-unknowns ----
 	await runPool(auditAdds, 3, async (n) => {

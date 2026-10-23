@@ -102,7 +102,14 @@ describe("NotionClient", () => {
 		const res = await h.client.request<{ done: boolean }>("GET", "/x");
 		expect(res.done).toBe(true);
 		expect(h.calls).toHaveLength(3);
-		expect(h.sleeps).toEqual([1000, 2000]);
+		// exponential with ±10% jitter: assert the shape, not exact ms — a
+		// fixed value would make two devices on the same interval retry in
+		// lock step, which is the bug the jitter exists to avoid
+		expect(h.sleeps).toHaveLength(2);
+		expect(h.sleeps[0]).toBeGreaterThanOrEqual(900);
+		expect(h.sleeps[0]).toBeLessThanOrEqual(1100);
+		expect(h.sleeps[1]).toBeGreaterThanOrEqual(1800);
+		expect(h.sleeps[1]).toBeLessThanOrEqual(2200);
 	});
 
 	it("throws after maxRetries retries on persistent 500", async () => {
@@ -114,7 +121,7 @@ describe("NotionClient", () => {
 			status: 500,
 		});
 		expect(h.calls).toHaveLength(3);
-		expect(h.sleeps).toEqual([1000, 2000]);
+		expect(h.sleeps).toHaveLength(2);
 	});
 
 	it("throws NotionApiError immediately on 400 without retrying", async () => {

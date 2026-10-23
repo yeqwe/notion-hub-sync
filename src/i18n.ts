@@ -180,6 +180,60 @@ export interface I18nStrings {
 	confirmQuarantineText: string;
 	confirmQuarantineOk: string;
 	logClearRemote(count: number): string;
+
+	// ── M8: pause / blocked / changes list / phase detail ──
+	commandTogglePause: string;
+	commandPauseSync: string;
+	commandResumeSync: string;
+	pausedNotice: string;
+	resumedNotice: string;
+	pausedLabel: string;
+	pausedTip: string;
+	ribbonLabel(input: {
+		paused: boolean;
+		syncing: boolean;
+		failed: boolean;
+		blocked: number;
+		conflicts: number;
+		pending: number;
+		lastSync: string | null;
+	}): string;
+	statusTipBlocked(count: number): string;
+	statusTipPending(count: number): string;
+	statusTipPaused: string;
+	blockedHeadline(count: number): string;
+	blockedReason(reason: string): string;
+	blockedGroup(reason: string): string;
+	blockedListed: string;
+	blockedFolded(count: number): string;
+	blockedOthersUnaffected: string;
+	blockedPanelTitle: string;
+	blockedNoticeDetail(count: number, detail: string): string;
+	phaseDownload: string;
+	phaseUpload: string;
+	phaseApply: string;
+	phaseStage(stage: string, done: number | null, total: number | null): string;
+	changesTitle: string;
+	changesEmpty: string;
+	changesCount(count: number): string;
+	changesRefresh: string;
+	changesOpen: string;
+	changesNew: string;
+	changesModified: string;
+	changesRenamed: string;
+	changesDeleted: string;
+	changesUnsynced: string;
+	settingsScope: string;
+	settingsScopeDescription: string;
+	settingsScopeImages: string;
+	settingsScopeAudio: string;
+	settingsScopeVideo: string;
+	settingsScopePdf: string;
+	settingsScopeOther: string;
+	settingsScopeOtherDescription: string;
+	settingsExcludedFolders: string;
+	settingsExcludedFoldersDescription: string;
+	settingsExcludedFoldersPlaceholder: string;
 }
 
 const EN_STRINGS: I18nStrings = {
@@ -412,6 +466,107 @@ const EN_STRINGS: I18nStrings = {
 	confirmQuarantineOk: "Rename and re-match",
 	logClearRemote: (count) =>
 		`Moved ${count} Notion page${count === 1 ? "" : "s"} to trash.`,
+
+	commandTogglePause: "Pause / resume sync",
+	commandPauseSync: "Pause sync",
+	commandResumeSync: "Resume sync",
+	pausedNotice: "Sync paused — automatic rounds are off.",
+	resumedNotice: "Sync resumed.",
+	pausedLabel: "Paused",
+	pausedTip: "Sync is paused — no automatic rounds will run.",
+	ribbonLabel: (i) => {
+		const parts: string[] = [];
+		if (i.paused) parts.push("paused");
+		else if (i.syncing) parts.push("syncing…");
+		else if (i.failed) parts.push("last sync had failures");
+		if (i.conflicts > 0)
+			parts.push(
+				`${i.conflicts} unresolved conflict${i.conflicts === 1 ? "" : "s"}`,
+			);
+		if (i.blocked > 0)
+			parts.push(
+				`${i.blocked} file${i.blocked === 1 ? "" : "s"} not synced`,
+			);
+		if (i.pending > 0)
+			parts.push(
+				`${i.pending} change${i.pending === 1 ? "" : "s"} pending`,
+			);
+		if (parts.length === 0 && !i.paused && !i.syncing && i.lastSync)
+			parts.push("all synced");
+		if (i.lastSync) parts.push(`last sync ${i.lastSync}`);
+		return parts.length > 0
+			? `Notion Hub Sync：${parts.join(" ｜ ")}`
+			: "Notion Hub Sync";
+	},
+	statusTipBlocked: (count) =>
+		`Notion Hub Sync — ${count} file${count === 1 ? "" : "s"} not synced`,
+	statusTipPending: (count) =>
+		`Notion Hub Sync — ${count} change${count === 1 ? "" : "s"} pending`,
+	statusTipPaused: "Notion Hub Sync — paused",
+	blockedHeadline: (count) =>
+		`${count} file${count === 1 ? "" : "s"} not synced`,
+	blockedReason: (reason) =>
+		({
+			oversized: "above the size limit",
+			remoteOversized: "remote copy above the size limit",
+			readFailed: "could not be read — retried next round",
+			caseConflict: "differs from another path only by case",
+		})[reason] ?? reason,
+	blockedGroup: (reason) =>
+		({
+			oversized: "{n} above the size limit",
+			remoteOversized: "{n} with an oversized remote copy",
+			readFailed: "{n} unreadable",
+			caseConflict: "{n} clashing by case",
+		})[reason] ?? "{n}",
+	blockedListed: "Not synced: ",
+	blockedFolded: (count) => ` and ${count} more`,
+	blockedOthersUnaffected: "Other files are unaffected.",
+	blockedPanelTitle: "Not synced",
+	blockedNoticeDetail: (count, detail) =>
+		`${count} file${count === 1 ? "" : "s"} not synced. ${detail}`,
+	phaseDownload: "Downloading from Notion…",
+	phaseUpload: "Uploading to Notion…",
+	phaseApply: "Applying changes…",
+	phaseStage: (stage, done, total) => {
+		const base =
+			({
+				hashing: "Hashing local files",
+				walking: "Walking the Notion tree",
+				evaluating: "Checking Notion pages",
+				downloading: "Downloading",
+				uploading: "Uploading",
+				applying: "Applying",
+				config: "Syncing settings",
+			})[stage] ?? stage;
+		return done !== null && total !== null
+			? `${base} ${done}/${total}`
+			: base;
+	},
+	changesTitle: "Pending changes",
+	changesEmpty: "Everything is synced.",
+	changesCount: (count) => String(count),
+	changesRefresh: "Refresh",
+	changesOpen: "Open",
+	changesNew: "New — not yet in Notion",
+	changesModified: "Modified since last sync",
+	changesRenamed: "Renamed since last sync",
+	changesDeleted: "Deleted locally since last sync",
+	changesUnsynced: "Not synced (blocked)",
+	settingsScope: "What to sync",
+	settingsScopeDescription:
+		"Notes always sync. Other file types and folders can be left out.",
+	settingsScopeImages: "Images",
+	settingsScopeAudio: "Audio",
+	settingsScopeVideo: "Video",
+	settingsScopePdf: "PDF",
+	settingsScopeOther: "Other files",
+	settingsScopeOtherDescription:
+		"Anything Obsidian cannot open (zip, psd, exe…).",
+	settingsExcludedFolders: "Excluded folders",
+	settingsExcludedFoldersDescription:
+		"One folder per line, relative to the vault root. Nothing inside them is ever synced.",
+	settingsExcludedFoldersPlaceholder: "Private\nAssets/raw",
 };
 
 const ZH_CN_STRINGS: I18nStrings = {
@@ -628,6 +783,95 @@ const ZH_CN_STRINGS: I18nStrings = {
 		"同步记录文件无法读取，这会让每轮同步都重新下载整个库。是否把损坏的文件改名保留（便于排查），并按 Notion 现有页面重新匹配？",
 	confirmQuarantineOk: "改名保留并重新匹配",
 	logClearRemote: (count) => `已将 ${count} 个 Notion 页面移入回收站`,
+
+	commandTogglePause: "暂停 / 继续同步",
+	commandPauseSync: "暂停同步",
+	commandResumeSync: "继续同步",
+	pausedNotice: "同步已暂停，自动同步不会运行。",
+	resumedNotice: "同步已继续。",
+	pausedLabel: "已暂停",
+	pausedTip: "同步已暂停，不会自动运行。",
+	ribbonLabel: (i) => {
+		const parts: string[] = [];
+		if (i.paused) parts.push("已暂停");
+		else if (i.syncing) parts.push("同步中…");
+		else if (i.failed) parts.push("上次同步有失败项");
+		if (i.conflicts > 0) parts.push(`${i.conflicts} 个冲突副本待处理`);
+		if (i.blocked > 0) parts.push(`${i.blocked} 个文件未同步`);
+		if (i.pending > 0) parts.push(`${i.pending} 项待同步`);
+		if (parts.length === 0 && !i.paused && !i.syncing && i.lastSync)
+			parts.push("已全部同步");
+		if (i.lastSync) parts.push(`最后同步 ${i.lastSync}`);
+		return parts.length > 0
+			? `Notion Hub Sync：${parts.join(" ｜ ")}`
+			: "Notion Hub Sync";
+	},
+	statusTipBlocked: (count) => `Notion Hub Sync —— ${count} 个文件未同步`,
+	statusTipPending: (count) => `Notion Hub Sync —— ${count} 项待同步`,
+	statusTipPaused: "Notion Hub Sync —— 已暂停",
+	blockedHeadline: (count) => `${count} 个文件暂时未同步`,
+	blockedReason: (reason) =>
+		({
+			oversized: "超过单文件上限",
+			remoteOversized: "云端副本超过单文件上限",
+			readFailed: "无法读取本地内容，下次同步会重试",
+			caseConflict: "与另一项仅大小写不同",
+		})[reason] ?? reason,
+	blockedGroup: (reason) =>
+		({
+			oversized: "{n} 个超过单文件上限",
+			remoteOversized: "{n} 个云端副本超限",
+			readFailed: "{n} 个无法读取",
+			caseConflict: "{n} 个仅大小写冲突",
+		})[reason] ?? "{n}",
+	blockedListed: "未同步文件：",
+	blockedFolded: (count) => ` 等 ${count} 个文件`,
+	blockedOthersUnaffected: "其他文件不受影响。",
+	blockedPanelTitle: "未同步",
+	blockedNoticeDetail: (count, detail) =>
+		`${count} 个文件未同步。${detail}`,
+	phaseDownload: "正在从 Notion 下载…",
+	phaseUpload: "正在上传到 Notion…",
+	phaseApply: "正在应用变更…",
+	phaseStage: (stage, done, total) => {
+		const base =
+			({
+				hashing: "正在计算本地文件哈希",
+				walking: "正在遍历 Notion 树",
+				evaluating: "正在核对 Notion 页面",
+				downloading: "正在下载",
+				uploading: "正在上传",
+				applying: "正在应用",
+				config: "正在同步设置",
+			})[stage] ?? stage;
+		return done !== null && total !== null
+			? `${base} ${done}/${total}`
+			: base;
+	},
+	changesTitle: "待同步改动",
+	changesEmpty: "全部已同步。",
+	changesCount: (count) => String(count),
+	changesRefresh: "刷新",
+	changesOpen: "打开",
+	changesNew: "尚未同步（新文件）",
+	changesModified: "上次同步后有改动",
+	changesRenamed: "上次同步后重命名",
+	changesDeleted: "上次同步后已在本地删除",
+	changesUnsynced: "未同步（被阻塞）",
+	settingsScope: "同步范围",
+	settingsScopeDescription:
+		"笔记始终会同步；其他类型的文件与文件夹可以排除。",
+	settingsScopeImages: "图片",
+	settingsScopeAudio: "音频",
+	settingsScopeVideo: "视频",
+	settingsScopePdf: "PDF",
+	settingsScopeOther: "其他文件",
+	settingsScopeOtherDescription:
+		"Obsidian 无法打开的文件（zip、psd、exe 等）。",
+	settingsExcludedFolders: "排除的文件夹",
+	settingsExcludedFoldersDescription:
+		"每行一个，相对仓库根目录。这些文件夹内的内容永远不会被同步。",
+	settingsExcludedFoldersPlaceholder: "私人日记\n素材/原始素材",
 };
 
 export function resolveLocale(language: string | undefined): SupportedLocale {
@@ -677,4 +921,17 @@ export function setOverriddenLocale(value: string | undefined): void {
 export function getStrings(language?: string): I18nStrings {
 	const lang = language ?? overriddenLocale ?? detectLanguage();
 	return resolveLocale(lang) === "zh-CN" ? ZH_CN_STRINGS : EN_STRINGS;
+}
+
+/** i18n → `summarizeBlocked` labels. Kept here so `sync/` stays free of
+ * any dependency on the UI strings module. */
+export function blockedLabels(s: I18nStrings = getStrings()): import("./sync/blocked").BlockedLabels {
+	return {
+		reason: (r) => s.blockedReason(r),
+		group: (r) => s.blockedGroup(r),
+		headline: (n) => s.blockedHeadline(n),
+		listed: s.blockedListed,
+		folded: (n) => s.blockedFolded(n),
+		othersUnaffected: s.blockedOthersUnaffected,
+	};
 }

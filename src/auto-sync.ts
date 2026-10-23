@@ -11,6 +11,11 @@ import type { SyncReport } from "./sync/deps";
 
 export interface AutoSyncSettings {
 	autoSync: boolean;
+	/** Master hold: no *automatic* round runs while this is true. Manual
+	 * commands deliberately still work — "pause" means "stop doing this
+	 * behind my back", not "disable the plugin". Optional so older callers
+	 * and tests keep compiling; `undefined` reads as "not paused". */
+	paused?: boolean;
 	autoSyncDebounceSeconds: number;
 	autoSyncIntervalMinutes: number;
 	syncOnStartup: boolean;
@@ -41,6 +46,10 @@ export interface AutoSyncHooks {
 	configDir(): string;
 	/** run one auto round; resolves with the report. */
 	request(): Promise<SyncReport>;
+	/** called on every relevant vault change, before the debounce fires:
+	 * lets the host keep the "pending changes" list honest without a second
+	 * event subscription (and without a second debounce timer). */
+	onChange?(path: string): void;
 	/** called with each auto round's report (silent handling lives in main). */
 	onReport?(report: SyncReport): void;
 	setTimeoutFn?(cb: () => void, ms: number): number;
@@ -49,12 +58,24 @@ export interface AutoSyncHooks {
 	now?(): number;
 }
 
-/** Auto triggers require a completed manual sync on this device. */
+/** Auto triggers require a completed manual sync on this device and that
+ * the user hasn't paused them. */
 export function autoSyncAllowed(
 	settings: AutoSyncSettings,
 	state: SyncState | null,
 ): boolean {
-	return settings.autoSync && state?.lastSyncAt !== undefined;
+	return (
+		settings.autoSync &&
+		!settings.paused &&
+		state?.lastSyncAt !== undefined
+	);
+}
+
+/** Can automatic sync run at all (regardless of whether a first manual round
+ * happened)? Used by the ribbon/tooltips, which must show "paused" even
+ * before the first sync. */
+export function shouldAutoRun(settings: AutoSyncSettings): boolean {
+	return settings.autoSync && !settings.paused;
 }
 
 /** Paths that never trigger auto-sync: dot segments, .trash, configDir. */
@@ -101,13 +122,17 @@ export function wireAutoSync(
 	for (const type of ["modify", "create", "delete"] as const) {
 		host.registerEvent(
 			host.onVaultEvent(type, (path) => {
-				if (relevant(path) && !ours(path)) schedule();
+				if (!relevant(path) || ours(path)) return;
+				hooks.onChange?.(path);
+				schedule();
 			}),
 		);
 	}
 	host.registerEvent(
 		host.onVaultEvent("rename", (path) => {
-			if (relevant(path) && !ours(path)) schedule();
+			if (!relevant(path) || ours(path)) return;
+			hooks.onChange?.(path);
+			schedule();
 		}),
 	);
 

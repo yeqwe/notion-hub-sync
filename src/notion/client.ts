@@ -299,7 +299,12 @@ export class NotionClient {
 				}
 			}
 		}
-		return BACKOFF_BASE_MS * 2 ** attempt;
+		// ±10% jitter. Two devices on the same interval fire at the same
+		// moment, both get 429, both wait exactly 1s, both retry together —
+		// a fixed backoff synchronizes the retries it was meant to spread
+		// out. The jitter keeps them from locking step.
+		const base = BACKOFF_BASE_MS * 2 ** attempt;
+		return Math.round(base * (0.9 + Math.random() * 0.2));
 	}
 
 	private header(

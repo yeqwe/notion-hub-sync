@@ -12,6 +12,7 @@ import { NotionClient } from "./notion/client";
 import { parseNotionId } from "./notion/ids";
 import {
 	DEFAULT_SETTINGS,
+	mergeSettings,
 	ROUND_ROBIN_PER_ROUND,
 	type NotionHubSettings,
 } from "./settings";
@@ -43,6 +44,9 @@ import {
 	type SyncPanelDeps,
 } from "./ui/sync-panel-view";
 import { autoSyncIgnoresPath, wireAutoSync } from "./auto-sync";
+import { summarizeBlocked } from "./sync/blocked";
+import { blockedLabels } from "./i18n";
+import { scanPendingChanges, type PendingChange } from "./sync/changes";
 
 export default class NotionHubSyncPlugin extends Plugin {
 	settings: NotionHubSettings = { ...DEFAULT_SETTINGS };
@@ -68,6 +72,10 @@ export default class NotionHubSyncPlugin extends Plugin {
 	});
 	private nextTrigger: "manual" | "full" | "auto" = "manual";
 	private roundStartAt = 0;
+	/** Debounced cache for the panel's "pending changes" card. */
+	private pendingCache: PendingChange[] = [];
+	private pendingTimer: number | null = null;
+	private pendingScanning = false;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -156,6 +164,11 @@ export default class NotionHubSyncPlugin extends Plugin {
 			name: strings.commandReupload,
 			callback: () => void this.reuploadFromLocal(),
 		});
+		this.addCommand({
+			id: "toggle-pause-sync",
+			name: strings.commandTogglePause,
+			callback: () => void this.togglePause(),
+		});
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu, file) => {
 				if (!(file instanceof TFile)) return;
@@ -235,6 +248,8 @@ export default class NotionHubSyncPlugin extends Plugin {
 				getState: () => this.state,
 				getVaultIO: () => this.io,
 				configDir: () => this.app.vault.configDir,
+				/** Manual rounds stay available while paused — "pause" stops the
+				 * automatic ones only. */
 				request: async () => {
 					this.nextTrigger = "auto";
 					if (!(await this.syncDeps())) {
@@ -256,6 +271,7 @@ export default class NotionHubSyncPlugin extends Plugin {
 					}
 				},
 				onReport: (r) => this.handleAutoReport(r),
+				onChange: () => this.schedulePendingScan(),
 			},
 		);
 	}
@@ -369,6 +385,7 @@ export default class NotionHubSyncPlugin extends Plugin {
 				roundRobinPerRound: ROUND_ROBIN_PER_ROUND,
 				maxFileSizeMB: this.settings.maxFileSizeMB,
 				deleteGuardThreshold: this.settings.deleteGuardThreshold,
+				scope: this.settings.scope,
 			},
 			confirmLocalDeletes: (paths) => this.guardLocalDeletes(paths),
 			log: (m) => {
@@ -434,8 +451,13 @@ export default class NotionHubSyncPlugin extends Plugin {
 		for (const c of r.conflictCopies) {
 			this.syncLog.warn(strings.logConflictCopy(c), c);
 		}
+		// One line per blocked file, with the reason — a skipped file that
+		// shows nothing is indistinguishable from one that synced.
 		for (const b of r.blocked) {
-			this.syncLog.warn(strings.logBlocked(b), b);
+			this.syncLog.warn(
+				`${strings.blockedHeadline(1)}: ${b.path} — ${strings.blockedReason(b.reason)}`,
+				b.path,
+			);
 		}
 		const secs = ((Date.now() - this.roundStartAt) / 1000).toFixed(1);
 		const summary = `${strings.syncDone(
@@ -451,6 +473,7 @@ export default class NotionHubSyncPlugin extends Plugin {
 		}
 		void this.syncLog.flush();
 		this.setSyncing(false);
+		this.schedulePendingScan();
 	}
 
 	/** Engine activity → sync log + panel progress. */
@@ -469,9 +492,37 @@ export default class NotionHubSyncPlugin extends Plugin {
 									: strings.phasePlanEmpty
 								: ev.phase === "config"
 									? strings.phaseConfig
-									: strings.phaseJournal;
+									: ev.phase === "download"
+										? strings.phaseDownload
+										: ev.phase === "upload"
+											? strings.phaseUpload
+											: ev.phase === "apply"
+												? strings.phaseApply
+												: strings.phaseJournal;
 				this.syncLog.info(text);
 				this.forEachPanel((v) => v.setActivity(text));
+				break;
+			}
+			case "stage": {
+				// In-flight detail (a download ticking bytes): the panel bar stays
+				// indeterminate but names what is actually running.
+				const text = strings.phaseStage(
+					ev.stage,
+					ev.done ?? null,
+					ev.total ?? null,
+				);
+				const line =
+					ev.label && ev.label !== text ? `${text} · ${ev.label}` : text;
+				this.statusEl?.setText(
+					ev.done !== undefined && ev.total !== undefined
+						? `NHS ${ev.done}/${ev.total}`
+						: "NHS …",
+				);
+				if (ev.done !== undefined && ev.total !== undefined) {
+					this.forEachPanel((v) => v.setProgress(ev.done!, ev.total!, line));
+				} else {
+					this.forEachPanel((v) => v.setActivity(line));
+				}
 				break;
 			}
 			case "action": {
@@ -546,9 +597,13 @@ export default class NotionHubSyncPlugin extends Plugin {
 			log: this.syncLog,
 			getState: () => this.state,
 			isSyncing: () => this.syncing,
+			isPaused: () => this.settings.paused,
+			getChanges: () => this.pendingCache,
 			onOpenPath: (path) => this.openVaultPath(path),
 			onSyncNow: () => void this.runEngine(false),
 			onFullSync: () => void this.runEngine(true),
+			onTogglePause: () => void this.togglePause(),
+			onRefreshChanges: () => this.schedulePendingScan(),
 			onOpenStatus: () =>
 				openStatusModal({
 					app: this.app,
@@ -737,6 +792,16 @@ export default class NotionHubSyncPlugin extends Plugin {
 					? `\n${issues.slice(0, 5).join("\n")}`
 					: "";
 			new Notice(`${summary}${tail}`, 15000);
+			if (report.blocked.length > 0) {
+				const sum = summarizeBlocked(
+					report.blocked,
+					blockedLabels(strings),
+				);
+				new Notice(
+					strings.blockedNoticeDetail(sum.count, sum.detail),
+					15000,
+				);
+			}
 			if (report.configWritten) {
 				this.notifyConfigReload();
 			}
@@ -767,7 +832,13 @@ export default class NotionHubSyncPlugin extends Plugin {
 			new Notice(strings.conflictNotice(report.conflictCopies.length), 15000);
 		}
 		if (report.blocked.length > 0) {
-			new Notice(strings.blockedNotice(report.blocked.length), 15000);
+			// Say WHY, not just how many: "3 files blocked" leaves the user
+			// guessing which ones and what to do about it.
+			const sum = summarizeBlocked(report.blocked, blockedLabels(strings));
+			new Notice(
+				strings.blockedNoticeDetail(sum.count, sum.detail),
+				15000,
+			);
 		}
 		this.forEachPanel((v) => v.hideProgress());
 		this.updateStatus();
@@ -783,6 +854,8 @@ export default class NotionHubSyncPlugin extends Plugin {
 		const strings = getStrings();
 		this.forEachPanel((v) => v.refresh());
 		const st = this.state;
+		const paused = this.settings.paused;
+		this.ribbonEl?.toggleClass("nhs-ribbon-paused", paused);
 		if (this.syncing) {
 			this.statusEl?.setText("NHS …");
 			this.ribbonEl?.addClass("nhs-ribbon-spinning");
@@ -794,25 +867,107 @@ export default class NotionHubSyncPlugin extends Plugin {
 		const last = st?.lastSyncAt;
 		const failed = (st?.lastReport?.failed ?? 0) > 0;
 		const conflicts = st?.lastReport?.conflictCopies.length ?? 0;
-		this.ribbonEl?.toggleClass("nhs-ribbon-warn", failed || conflicts > 0);
+		const blocked = st?.lastReport?.blocked?.length ?? 0;
+		const pending = this.pendingCache.length;
+		const bad = failed || conflicts > 0 || blocked > 0;
+		this.ribbonEl?.toggleClass("nhs-ribbon-warn", bad && !paused);
+		this.setRibbonBadge(bad && !paused);
 		const time = last
 			? new Date(last).toLocaleTimeString([], {
 					hour: "2-digit",
 					minute: "2-digit",
 				})
 			: null;
-		const tip = failed
-			? strings.statusTipFailed
-			: conflicts > 0
-				? strings.statusTipConflicts(conflicts)
-				: time
-					? strings.statusTipIdle(time)
-					: "Notion Hub Sync";
+		// Order mirrors urgency: paused first (nothing will happen), then
+		// anything a user must act on, then the timestamps.
+		const tip = strings.ribbonLabel({
+			paused,
+			syncing: false,
+			failed,
+			blocked,
+			conflicts,
+			pending,
+			lastSync: time,
+		});
 		this.ribbonEl?.setAttribute("aria-label", tip);
 		this.ribbonEl?.setAttribute("title", tip);
 		this.statusEl?.setText(
-			time ? strings.syncDoneAt(time) : "",
+			paused
+				? strings.pausedLabel
+				: time
+					? strings.syncDoneAt(time)
+					: "",
 		);
+	}
+
+	/** Warning dot on the ribbon icon.
+	 *
+	 * A real child node, not a `::after` pseudo-element: mobile renders the
+	 * ribbon as menu items and drops pseudo-elements, which silently lost the
+	 * indicator on phones. Idempotent — reconcile instead of toggling so a
+	 * theme re-render can't leave two dots. */
+	private setRibbonBadge(on: boolean): void {
+		const el = this.ribbonEl;
+		if (!el) return;
+		const existing = el.querySelector<HTMLElement>(".nhs-ribbon-badge");
+		if (!on) {
+			existing?.remove();
+			return;
+		}
+		if (existing) return;
+		const dot = el.createSpan({ cls: "nhs-ribbon-badge" });
+		dot.setAttribute("aria-hidden", "true");
+	}
+
+	/** Toggle the pause hold. Manual sync stays available on purpose. */
+	private async togglePause(): Promise<void> {
+		const strings = getStrings();
+		this.settings.paused = !this.settings.paused;
+		await this.saveSettings();
+		new Notice(
+			this.settings.paused ? strings.pausedNotice : strings.resumedNotice,
+		);
+		this.updateStatus();
+	}
+
+	/** Recompute the panel's "pending changes" list (debounced; read-only). */
+	private schedulePendingScan(): void {
+		if (this.pendingTimer !== null) window.clearTimeout(this.pendingTimer);
+		this.pendingTimer = window.setTimeout(() => {
+			this.pendingTimer = null;
+			void this.scanPending();
+		}, 400);
+	}
+
+	private async scanPending(): Promise<void> {
+		const st = this.state;
+		if (!st || this.pendingScanning) return;
+		this.pendingScanning = true;
+		try {
+			const files = this.app.vault.getFiles().map((f) => ({
+				path: f.path,
+				size: f.stat.size,
+				mtime: f.stat.mtime,
+			}));
+			this.pendingCache = scanPendingChanges({
+				state: st,
+				files,
+				blocked: st.lastReport?.blocked ?? [],
+				scope: this.settings.scope,
+				renameHints: st.renameHints ?? [],
+			});
+		} finally {
+			this.pendingScanning = false;
+		}
+		this.forEachPanel((v) => v.setChanges(this.pendingCache));
+		this.updateStatus();
+	}
+
+	/** Change row click: open the file, or explain why it can't be opened.
+	 * Delegates to the log-row handler so both paths behave identically
+	 * (a vanished path must show the same notice either way). */
+	private openPending(path: string): void {
+		this.openVaultPath(path);
 	}
 
 	/** Notice with a Reload button — never auto-reloads. */
@@ -834,12 +989,7 @@ export default class NotionHubSyncPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		const saved = await this.loadData();
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
-		this.settings.configSync = Object.assign(
-			{},
-			DEFAULT_SETTINGS.configSync,
-			saved?.configSync,
-		);
+		this.settings = mergeSettings(saved);
 		if (!this.settings.deviceId) {
 			this.settings.deviceId = newDeviceId();
 			await this.saveSettings();
