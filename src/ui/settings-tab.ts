@@ -4,7 +4,12 @@ import { testConnection } from "../connection";
 import type { SelectiveConfigSettings } from "../config/filter";
 import { normalizeExcludedFolders } from "../sync/scope";
 import type { ScopeSettings } from "../sync/scope";
-import { addMultiSelect } from "./settings-sections";
+import {
+	addMultiSelect,
+	addNumberSlider,
+	addSection,
+	sliderReadout,
+} from "./settings-sections";
 import type NotionHubSyncPlugin from "../main";
 
 /** The five file-kind switches in `ScopeSettings` (notes are always on). */
@@ -15,10 +20,63 @@ export class NotionHubSettingTab extends PluginSettingTab {
 		super(plugin.app, plugin);
 	}
 
+	/** One slider row. The unit lives in the readout, not the name, so the
+	 * name stays short and the range is visible without opening a tooltip. */
+	private numberSlider(
+		containerEl: HTMLElement,
+		name: string,
+		desc: string | null,
+		opts: {
+			min: number;
+			max: number;
+			step: number;
+			value: number;
+			unit: string;
+			/** Text shown at 0 instead of "0 …" — several sliders use 0 as off. */
+			offAtZero?: string;
+		},
+		write: (n: number) => void,
+	): void {
+		const s = new Setting(containerEl).setName(name);
+		if (desc) s.setDesc(desc);
+		addNumberSlider(s, {
+			min: opts.min,
+			max: opts.max,
+			step: opts.step,
+			value: opts.value,
+			format: (n) => sliderReadout(n, opts.unit, opts.offAtZero),
+			onInput: write,
+			save: () => this.plugin.saveSettings(),
+			ariaLabel: name,
+		});
+	}
+
+	private toggle(
+		containerEl: HTMLElement,
+		name: string,
+		desc: string | null,
+		get: () => boolean,
+		set: (v: boolean) => void,
+	): Setting {
+		const s = new Setting(containerEl).setName(name);
+		if (desc) s.setDesc(desc);
+		return s.addToggle((toggle) =>
+			toggle.setValue(get()).onChange(async (value) => {
+				set(value);
+				await this.plugin.saveSettings();
+			}),
+		);
+	}
+
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+		containerEl.addClass("nhs-settings");
 		const strings = getStrings();
+		const st = this.plugin.settings;
+
+		// ── connection ───────────────────────────────────────
+		addSection(containerEl, strings.sectionConnection);
 
 		new Setting(containerEl)
 			.setName(strings.settingsLanguage)
@@ -28,9 +86,9 @@ export class NotionHubSettingTab extends PluginSettingTab {
 					.addOption("auto", strings.languageAuto)
 					.addOption("zh-CN", "简体中文")
 					.addOption("en", "English")
-					.setValue(this.plugin.settings.language)
+					.setValue(st.language)
 					.onChange(async (value) => {
-						this.plugin.settings.language = value;
+						st.language = value;
 						setOverriddenLocale(value);
 						await this.plugin.saveSettings();
 						// rebuild so every label picks up the new language
@@ -43,12 +101,10 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			.setDesc(strings.integrationTokenDescription)
 			.addText((text) => {
 				text.inputEl.type = "password";
-				text.setValue(this.plugin.settings.token).onChange(
-					async (value) => {
-						this.plugin.settings.token = value;
-						await this.plugin.saveSettings();
-					},
-				);
+				text.setValue(st.token).onChange(async (value) => {
+					st.token = value;
+					await this.plugin.saveSettings();
+				});
 			});
 
 		new Setting(containerEl)
@@ -56,173 +112,46 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			.setDesc(strings.rootPageDescription)
 			.addText((text) => {
 				text.setPlaceholder(strings.rootPagePlaceholder)
-					.setValue(this.plugin.settings.rootPage)
+					.setValue(st.rootPage)
 					.onChange(async (value) => {
-						this.plugin.settings.rootPage = value;
+						st.rootPage = value;
 						await this.plugin.saveSettings();
 					});
 			});
 
-		new Setting(containerEl)
-			.setName(strings.settingsHistory)
-			.setDesc(strings.settingsHistoryDescription)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.historyEnabled)
-					.onChange(async (value) => {
-						this.plugin.settings.historyEnabled = value;
-						await this.plugin.saveSettings();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName(strings.settingsHistoryInterval)
-			.setDesc(strings.settingsHistoryIntervalDescription)
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.historyIntervalMinutes))
-					.onChange(async (value) => {
-						const n = Number(value);
-						if (Number.isFinite(n) && n >= 0) {
-							this.plugin.settings.historyIntervalMinutes = n;
-							await this.plugin.saveSettings();
+		new Setting(containerEl).addButton((button) =>
+			button
+				.setButtonText(strings.testConnection)
+				.setCta()
+				.onClick(async () => {
+					button.setButtonText(strings.testingConnection);
+					button.setDisabled(true);
+					try {
+						const result = await testConnection(st);
+						if (result.ok) {
+							new Notice(
+								strings.connectionSuccess(
+									result.botName,
+									result.pageTitle,
+								),
+							);
+						} else {
+							new Notice(result.message);
 						}
-					}),
-			);
+					} finally {
+						button.setDisabled(false);
+						button.setButtonText(strings.testConnection);
+					}
+				}),
+		);
 
-		new Setting(containerEl)
-			.setName(strings.settingsHistoryMaxVersions)
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.historyMaxVersions))
-					.onChange(async (value) => {
-						const n = Number(value);
-						if (Number.isInteger(n) && n > 0) {
-							this.plugin.settings.historyMaxVersions = n;
-							await this.plugin.saveSettings();
-						}
-					}),
-			);
+		// ── sync scope ───────────────────────────────────────
+		addSection(containerEl, strings.settingsScope);
 
-		new Setting(containerEl)
-			.setName(strings.settingsHistoryRetentionDays)
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.historyRetentionDays))
-					.onChange(async (value) => {
-						const n = Number(value);
-						if (Number.isInteger(n) && n > 0) {
-							this.plugin.settings.historyRetentionDays = n;
-							await this.plugin.saveSettings();
-						}
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName(strings.settingsFullAuditHours)
-			.setDesc(strings.settingsFullAuditHoursDescription)
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.fullAuditHours))
-					.onChange(async (value) => {
-						const n = Number(value);
-						if (Number.isFinite(n) && n > 0) {
-							this.plugin.settings.fullAuditHours = n;
-							await this.plugin.saveSettings();
-						}
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName(strings.settingsAutoSync)
-			.setDesc(strings.settingsAutoSyncDescription)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.autoSync)
-					.onChange(async (value) => {
-						this.plugin.settings.autoSync = value;
-						await this.plugin.saveSettings();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName(strings.settingsAutoSyncDebounce)
-			.setDesc(strings.settingsAutoSyncDebounceDescription)
-			.addText((text) =>
-				text
-					.setValue(
-						String(this.plugin.settings.autoSyncDebounceSeconds),
-					)
-					.onChange(async (value) => {
-						const n = Number(value);
-						if (Number.isFinite(n) && n >= 1) {
-							this.plugin.settings.autoSyncDebounceSeconds = n;
-							await this.plugin.saveSettings();
-						}
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName(strings.settingsAutoSyncInterval)
-			.setDesc(strings.settingsAutoSyncIntervalDescription)
-			.addText((text) =>
-				text
-					.setValue(
-						String(this.plugin.settings.autoSyncIntervalMinutes),
-					)
-					.onChange(async (value) => {
-						const n = Number(value);
-						if (Number.isFinite(n) && n >= 0) {
-							this.plugin.settings.autoSyncIntervalMinutes = n;
-							await this.plugin.saveSettings();
-						}
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName(strings.settingsSyncOnStartup)
-			.setDesc(strings.settingsSyncOnStartupDescription)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.syncOnStartup)
-					.onChange(async (value) => {
-						this.plugin.settings.syncOnStartup = value;
-						await this.plugin.saveSettings();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName(strings.settingsSyncOnForeground)
-			.setDesc(strings.settingsSyncOnForegroundDescription)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.syncOnForeground)
-					.onChange(async (value) => {
-						this.plugin.settings.syncOnForeground = value;
-						await this.plugin.saveSettings();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName(strings.settingsMaxFileSize)
-			.setDesc(strings.settingsMaxFileSizeDescription)
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.maxFileSizeMB))
-					.onChange(async (value) => {
-						const n = Number(value);
-						if (Number.isFinite(n) && n > 0) {
-							this.plugin.settings.maxFileSizeMB = n;
-							await this.plugin.saveSettings();
-						}
-					}),
-			);
-
-		// ── sync scope ────────────────────────────────────────
 		// Five file-type switches on one chip row: notes always sync, so the
 		// only decisions left are these, and they read as one question.
 		new Setting(containerEl)
-			.setName(strings.settingsScope)
+			.setName(strings.settingsScopeFileTypes)
 			.setDesc(strings.settingsScopeDescription)
 			.then((s) => {
 				// Chip rows are wider than a toggle: put the controls on their
@@ -242,9 +171,9 @@ export class NotionHubSettingTab extends PluginSettingTab {
 						},
 					],
 					{
-						isOn: (k) => this.plugin.settings.scope[k as ScopeKey],
+						isOn: (k) => st.scope[k as ScopeKey],
 						set: (k, on) => {
-							this.plugin.settings.scope[k as ScopeKey] = on;
+							st.scope[k as ScopeKey] = on;
 						},
 						commit: () => this.plugin.saveSettings(),
 					},
@@ -261,54 +190,187 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			.addTextArea((area) =>
 				area
 					.setPlaceholder(strings.settingsExcludedFoldersPlaceholder)
-					.setValue(
-						this.plugin.settings.scope.excludedFolders.join("\n"),
-					)
+					.setValue(st.scope.excludedFolders.join("\n"))
 					.onChange(async (value) => {
-						this.plugin.settings.scope.excludedFolders =
-							normalizeExcludedFolders(value.split("\n"));
+						st.scope.excludedFolders = normalizeExcludedFolders(
+							value.split("\n"),
+						);
 						await this.plugin.saveSettings();
 					}),
 			);
 
-		new Setting(containerEl)
-			.setName(strings.settingsDeleteGuard)
-			.setDesc(strings.settingsDeleteGuardDescription)
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.deleteGuardThreshold))
-					.onChange(async (value) => {
-						const n = Number(value);
-						if (Number.isInteger(n) && n >= 0) {
-							this.plugin.settings.deleteGuardThreshold = n;
-							await this.plugin.saveSettings();
-						}
-					}),
-			);
+		this.numberSlider(
+			containerEl,
+			strings.settingsMaxFileSize,
+			strings.settingsMaxFileSizeDescription,
+			{
+				min: 1,
+				max: 2000,
+				step: 1,
+				value: st.maxFileSizeMB,
+				unit: strings.unitMB,
+			},
+			(n) => {
+				st.maxFileSizeMB = n;
+			},
+		);
 
-		new Setting(containerEl)
-			.setName(strings.settingsDebugLog)
-			.setDesc(strings.settingsDebugLogDescription)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.debugLog)
-					.onChange(async (value) => {
-						this.plugin.settings.debugLog = value;
-						await this.plugin.saveSettings();
-					}),
-			);
+		// ── automatic sync ───────────────────────────────────
+		addSection(containerEl, strings.sectionAutoSync);
 
-		new Setting(containerEl)
-			.setName(strings.settingsConfigSync)
-			.setDesc(strings.settingsConfigSyncDescription)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.configSync.enabled)
-					.onChange(async (value) => {
-						this.plugin.settings.configSync.enabled = value;
-						await this.plugin.saveSettings();
-					}),
-			);
+		this.toggle(
+			containerEl,
+			strings.settingsAutoSyncToggle,
+			strings.settingsAutoSyncDescription,
+			() => st.autoSync,
+			(v) => {
+				st.autoSync = v;
+			},
+		);
+
+		this.numberSlider(
+			containerEl,
+			strings.settingsAutoSyncDebounce,
+			strings.settingsAutoSyncDebounceDescription,
+			{
+				min: 1,
+				max: 300,
+				step: 1,
+				value: st.autoSyncDebounceSeconds,
+				unit: strings.unitSeconds,
+			},
+			(n) => {
+				st.autoSyncDebounceSeconds = n;
+			},
+		);
+
+		this.numberSlider(
+			containerEl,
+			strings.settingsAutoSyncInterval,
+			strings.settingsAutoSyncIntervalDescription,
+			{
+				min: 0,
+				max: 1440,
+				step: 1,
+				value: st.autoSyncIntervalMinutes,
+				unit: strings.unitMinutes,
+				offAtZero: strings.valueOff,
+			},
+			(n) => {
+				st.autoSyncIntervalMinutes = n;
+			},
+		);
+
+		this.toggle(
+			containerEl,
+			strings.settingsSyncOnStartup,
+			strings.settingsSyncOnStartupDescription,
+			() => st.syncOnStartup,
+			(v) => {
+				st.syncOnStartup = v;
+			},
+		);
+
+		this.toggle(
+			containerEl,
+			strings.settingsSyncOnForeground,
+			strings.settingsSyncOnForegroundDescription,
+			() => st.syncOnForeground,
+			(v) => {
+				st.syncOnForeground = v;
+			},
+		);
+
+		// ── version history ──────────────────────────────────
+		addSection(containerEl, strings.settingsHistory);
+
+		this.toggle(
+			containerEl,
+			strings.settingsHistoryToggle,
+			strings.settingsHistoryDescription,
+			() => st.historyEnabled,
+			(v) => {
+				st.historyEnabled = v;
+			},
+		);
+
+		this.numberSlider(
+			containerEl,
+			strings.settingsHistoryInterval,
+			strings.settingsHistoryIntervalDescription,
+			{
+				min: 0,
+				max: 1440,
+				step: 1,
+				value: st.historyIntervalMinutes,
+				unit: strings.unitMinutes,
+				offAtZero: strings.valueOff,
+			},
+			(n) => {
+				st.historyIntervalMinutes = n;
+			},
+		);
+
+		this.numberSlider(
+			containerEl,
+			strings.settingsHistoryMaxVersions,
+			null,
+			{
+				min: 1,
+				max: 1000,
+				step: 1,
+				value: st.historyMaxVersions,
+				unit: strings.unitVersions,
+			},
+			(n) => {
+				st.historyMaxVersions = n;
+			},
+		);
+
+		this.numberSlider(
+			containerEl,
+			strings.settingsHistoryRetentionDays,
+			null,
+			{
+				min: 1,
+				max: 3650,
+				step: 1,
+				value: st.historyRetentionDays,
+				unit: strings.unitDays,
+			},
+			(n) => {
+				st.historyRetentionDays = n;
+			},
+		);
+
+		this.numberSlider(
+			containerEl,
+			strings.settingsFullAuditHours,
+			strings.settingsFullAuditHoursDescription,
+			{
+				min: 1,
+				max: 168,
+				step: 1,
+				value: st.fullAuditHours,
+				unit: strings.unitHours,
+			},
+			(n) => {
+				st.fullAuditHours = n;
+			},
+		);
+
+		// ── .obsidian config sync ────────────────────────────
+		addSection(containerEl, strings.settingsConfigSync);
+
+		this.toggle(
+			containerEl,
+			strings.settingsConfigSyncToggle,
+			strings.settingsConfigSyncDescription,
+			() => st.configSync.enabled,
+			(v) => {
+				st.configSync.enabled = v;
+			},
+		);
 
 		// Eight categories on one chip row — same reason as the file types.
 		// The community-data warning moves to the row description: a chip has
@@ -330,7 +392,7 @@ export class NotionHubSettingTab extends PluginSettingTab {
 		// is about is on, and collapse the empty desc row instead of leaving a
 		// blank line in the settings list.
 		const paintCatDesc = (): void => {
-			const warn = this.plugin.settings.configSync.communityPluginData;
+			const warn = st.configSync.communityPluginData;
 			catSetting.setDesc(warn ? strings.configCommunityDataWarning : "");
 			catSetting.descEl.toggleClass("nhs-desc-empty", !warn);
 		};
@@ -338,14 +400,9 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			catSetting.controlEl,
 			cats.map(([key, label]) => ({ key, label })),
 			{
-				isOn: (k) =>
-					this.plugin.settings.configSync[
-						k as keyof SelectiveConfigSettings
-					],
+				isOn: (k) => st.configSync[k as keyof SelectiveConfigSettings],
 				set: (k, on) => {
-					this.plugin.settings.configSync[
-						k as keyof SelectiveConfigSettings
-					] = on;
+					st.configSync[k as keyof SelectiveConfigSettings] = on;
 					paintCatDesc();
 				},
 				commit: () => this.plugin.saveSettings(),
@@ -357,31 +414,34 @@ export class NotionHubSettingTab extends PluginSettingTab {
 		);
 		paintCatDesc();
 
-		new Setting(containerEl).addButton((button) =>
-			button
-				.setButtonText(strings.testConnection)
-				.onClick(async () => {
-					button.setButtonText(strings.testingConnection);
-					button.setDisabled(true);
-					try {
-						const result = await testConnection(
-							this.plugin.settings,
-						);
-						if (result.ok) {
-							new Notice(
-								strings.connectionSuccess(
-									result.botName,
-									result.pageTitle,
-								),
-							);
-						} else {
-							new Notice(result.message);
-						}
-					} finally {
-						button.setDisabled(false);
-						button.setButtonText(strings.testConnection);
-					}
-				}),
+		// ── advanced ─────────────────────────────────────────
+		addSection(containerEl, strings.sectionAdvanced);
+
+		this.numberSlider(
+			containerEl,
+			strings.settingsDeleteGuard,
+			strings.settingsDeleteGuardDescription,
+			{
+				min: 0,
+				max: 1000,
+				step: 1,
+				value: st.deleteGuardThreshold,
+				unit: strings.unitFiles,
+				offAtZero: strings.valueOff,
+			},
+			(n) => {
+				st.deleteGuardThreshold = n;
+			},
+		);
+
+		this.toggle(
+			containerEl,
+			strings.settingsDebugLog,
+			strings.settingsDebugLogDescription,
+			() => st.debugLog,
+			(v) => {
+				st.debugLog = v;
+			},
 		);
 	}
 }

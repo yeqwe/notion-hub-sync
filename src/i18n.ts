@@ -30,7 +30,23 @@ export interface I18nStrings {
 		failed: number,
 	): string;
 	settingsHistory: string;
+	/** Section heading; the toggle below needs its own verb-y label. */
+	settingsHistoryToggle: string;
 	settingsHistoryDescription: string;
+	/** Section headings — the panel is grouped, not one long list. */
+	sectionConnection: string;
+	sectionAutoSync: string;
+	sectionAdvanced: string;
+	/** Units for the slider readouts ("10 分钟"). */
+	unitSeconds: string;
+	unitMinutes: string;
+	unitHours: string;
+	unitDays: string;
+	unitMB: string;
+	unitVersions: string;
+	unitFiles: string;
+	/** Slider readout when 0 means "off" rather than "zero". */
+	valueOff: string;
 	settingsHistoryInterval: string;
 	settingsHistoryIntervalDescription: string;
 	settingsHistoryMaxVersions: string;
@@ -38,6 +54,7 @@ export interface I18nStrings {
 	settingsFullAuditHours: string;
 	settingsFullAuditHoursDescription: string;
 	settingsConfigSync: string;
+	settingsConfigSyncToggle: string;
 	settingsConfigSyncDescription: string;
 	settingsConfigSyncCategories: string;
 	configCatApp: string;
@@ -80,6 +97,8 @@ export interface I18nStrings {
 	reasonPreDelete: string;
 	reasonRestore: string;
 	settingsAutoSync: string;
+	/** Master switch; `settingsAutoSync` is now the section heading. */
+	settingsAutoSyncToggle: string;
 	settingsAutoSyncDescription: string;
 	settingsAutoSyncDebounce: string;
 	settingsAutoSyncDebounceDescription: string;
@@ -228,6 +247,7 @@ export interface I18nStrings {
 	changesUnsynced: string;
 	settingsScope: string;
 	settingsScopeDescription: string;
+	settingsScopeFileTypes: string;
 	settingsScopeImages: string;
 	settingsScopeAudio: string;
 	settingsScopeVideo: string;
@@ -270,8 +290,20 @@ const EN_STRINGS: I18nStrings = {
 	syncDone: (created, updated, skipped, failed) =>
 		`Done: ${created} created, ${updated} updated, ${skipped} skipped, ${failed} failed.`,
 	settingsHistory: "Version history",
+	settingsHistoryToggle: "Keep version history",
 	settingsHistoryDescription:
 		"Keep per-file versions in Notion (pushes, pre-pull snapshots, restores).",
+	sectionConnection: "Connection",
+	sectionAutoSync: "Automatic sync",
+	sectionAdvanced: "Advanced",
+	unitSeconds: "sec",
+	unitMinutes: "min",
+	unitHours: "h",
+	unitDays: "days",
+	unitMB: "MB",
+	unitVersions: "versions",
+	unitFiles: "files",
+	valueOff: "Off",
 	settingsHistoryInterval: "Push version interval (minutes)",
 	settingsHistoryIntervalDescription:
 		"Minimum minutes between push versions of the same file.",
@@ -281,6 +313,7 @@ const EN_STRINGS: I18nStrings = {
 	settingsFullAuditHoursDescription:
 		"How often sync re-walks the whole Notion tree to catch missed changes.",
 	settingsConfigSync: "Sync Obsidian settings",
+	settingsConfigSyncToggle: "Enable config sync",
 	settingsConfigSyncDescription:
 		"Sync selected .obsidian config files through Notion (per device).",
 	settingsConfigSyncCategories: "Categories to sync",
@@ -329,6 +362,7 @@ const EN_STRINGS: I18nStrings = {
 	reasonPreDelete: "pre-delete",
 	reasonRestore: "restore",
 	settingsAutoSync: "Automatic sync",
+	settingsAutoSyncToggle: "Enable automatic sync",
 	settingsAutoSyncDescription:
 		"Sync automatically on vault changes, on an interval, on startup, and when the app returns to the foreground.",
 	settingsAutoSyncDebounce: "Change debounce (seconds)",
@@ -566,6 +600,7 @@ const EN_STRINGS: I18nStrings = {
 	settingsScope: "What to sync",
 	settingsScopeDescription:
 		"Notes always sync. Other file types and folders can be left out.",
+	settingsScopeFileTypes: "File types",
 	settingsScopeImages: "Images",
 	settingsScopeAudio: "Audio",
 	settingsScopeVideo: "Video",
@@ -608,8 +643,20 @@ const ZH_CN_STRINGS: I18nStrings = {
 	syncDone: (created, updated, skipped, failed) =>
 		`完成：新建 ${created}，更新 ${updated}，跳过 ${skipped}，失败 ${failed}。`,
 	settingsHistory: "版本历史",
+	settingsHistoryToggle: "保留版本历史",
 	settingsHistoryDescription:
 		"在 Notion 中为每个文件保留版本（推送、拉取前快照、恢复）。",
+	sectionConnection: "连接",
+	sectionAutoSync: "自动同步",
+	sectionAdvanced: "高级",
+	unitSeconds: "秒",
+	unitMinutes: "分钟",
+	unitHours: "小时",
+	unitDays: "天",
+	unitMB: "MB",
+	unitVersions: "个版本",
+	unitFiles: "个文件",
+	valueOff: "关闭",
 	settingsHistoryInterval: "推送版本间隔（分钟）",
 	settingsHistoryIntervalDescription: "同一文件两次推送版本之间的最小分钟数。",
 	settingsHistoryMaxVersions: "每个文件的最大版本数",
@@ -618,6 +665,7 @@ const ZH_CN_STRINGS: I18nStrings = {
 	settingsFullAuditHoursDescription:
 		"每隔多久重新遍历整个 Notion 树，捕捉遗漏的变更。",
 	settingsConfigSync: "同步 Obsidian 设置",
+	settingsConfigSyncToggle: "启用配置同步",
 	settingsConfigSyncDescription:
 		"通过 Notion 同步选定的 .obsidian 配置文件（按设备生效）。",
 	settingsConfigSyncCategories: "同步的类别",
@@ -663,6 +711,7 @@ const ZH_CN_STRINGS: I18nStrings = {
 	reasonPreDelete: "删除前",
 	reasonRestore: "恢复",
 	settingsAutoSync: "自动同步",
+	settingsAutoSyncToggle: "启用自动同步",
 	settingsAutoSyncDescription:
 		"在文件变更、定时、启动和应用回到前台时自动同步。",
 	settingsAutoSyncDebounce: "变更防抖（秒）",
@@ -877,6 +926,7 @@ const ZH_CN_STRINGS: I18nStrings = {
 	settingsScope: "同步范围",
 	settingsScopeDescription:
 		"笔记始终会同步；其他类型的文件与文件夹可以排除。",
+	settingsScopeFileTypes: "文件类型",
 	settingsScopeImages: "图片",
 	settingsScopeAudio: "音频",
 	settingsScopeVideo: "视频",

@@ -960,3 +960,47 @@
 .nhs-setting-stacked .nhs-multiselect {
 	justify-content: flex-start;
 }
+
+/* ---- settings: section headings + slider readout ---- */
+
+/* Obsidian already spaces setting rows; a section heading only needs to open
+   the gap above itself and mark the break. The first one sits flush with the
+   tab title, so it gets no rule and no top gap. */
+.nhs-settings h2.nhs-settings-section {
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+	letter-spacing: 0.02em;
+	color: var(--text-muted);
+	margin: 28px 0 4px;
+	padding-top: 16px;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.nhs-settings h2.nhs-settings-section:first-child {
+	margin-top: 8px;
+	padding-top: 0;
+	border-top: none;
+}
+
+/* the slider track shrinks so the readout has room on a narrow pane */
+.nhs-settings .setting-item-control .slider {
+	flex: 1 1 60%;
+	min-width: 80px;
+}
+
+/* Fixed width, right-aligned: without it the readout jitters horizontally
+   while dragging, because "5 分钟" and "10 分钟" are different widths. */
+.nhs-settings .nhs-slider-value {
+	flex: 0 0 auto;
+	min-width: 4.5em;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+/* mobile: the settings pane is one narrow column */
+.is-mobile .nhs-settings .setting-item-control .slider {
+	flex-basis: 50%;
+}
