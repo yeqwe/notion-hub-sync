@@ -1,4 +1,4 @@
-# Notion Hub Sync
+﻿# Notion Hub Sync
 
 通过 Notion 在多台设备之间同步你的整个 Obsidian 仓库 —— 无需 Obsidian Sync 订阅，桌面与移动端（iOS/Android）均可使用。Notion 作为中转枢纽：你的笔记被保存为一棵 Notion 页面树，任何一台设备改动后，其他设备在下一轮同步时拉取更新。
 
@@ -18,14 +18,14 @@
 
 1. 安装社区插件 **BRAT**（Beta Reviewers Auto-update Tester）。
 2. 命令面板运行 `BRAT: Add a beta plugin for testing`。
-3. 填入本仓库地址：`https://github.com/<你的用户名>/notion-hub-sync`。
+3. 填入本仓库地址：`https://github.com/yeqwe/notion-hub-sync`。
 4. 回到社区插件列表，启用 **Notion Hub Sync**。
 
 BRAT 会读取仓库的 GitHub Release（`manifest.json` / `versions.json` / `main.js` / `styles.css`）自动安装与升级。手机端无需手动拷贝文件。
 
 ### 方式二：手动安装
 
-从 [Releases](https://github.com/<你的用户名>/notion-hub-sync/releases) 下载 `main.js`、`manifest.json`、`styles.css`，放入 `<仓库>/.obsidian/plugins/notion-hub-sync/`。
+从 [Releases](https://github.com/yeqwe/notion-hub-sync/releases) 下载 `main.js`、`manifest.json`、`styles.css`，放入 `<仓库>/.obsidian/plugins/notion-hub-sync/`。
 
 ## 设置
 
