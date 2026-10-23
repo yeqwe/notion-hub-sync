@@ -4,6 +4,7 @@
 // since the snapshot, the action is skipped and the next round handles it.
 
 import { sha256Hex } from "../sync/hashes";
+import { NotionApiError } from "../notion/client";
 import { basename, parentDir, type VaultFile } from "../sync/vault-io";
 import { collisionFreePath, conflictPath, childDirOf } from "../sync/paths";
 import { newReport, type SyncDeps, type SyncReport } from "../sync/deps";
@@ -449,6 +450,12 @@ export async function applyActions(
 					path,
 					error: msg,
 				});
+			}
+			// A rejected token is not a per-file failure: every remaining
+			// action will hit the same wall. Flag it so the round can stop
+			// and the host can pause instead of reporting "failed: 200".
+			if (err instanceof NotionApiError && (err.status === 401 || err.status === 403)) {
+				ctx.report.authFailed = true;
 			}
 			ctx.report.failed++;
 			ctx.report.failures.push(`${action.type} ${path}: ${msg}`);

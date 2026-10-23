@@ -228,8 +228,10 @@ export default class NotionHubSyncPlugin extends Plugin {
 						cb,
 					),
 				onVaultEvent: (type, cb) => {
-					const w = (f: { path: string }, o?: string) =>
-						cb(f.path, o);
+					const w = (
+						f: { path: string },
+						o?: string,
+					) => cb(f.path, o, f instanceof TFolder);
 					switch (type) {
 						case "modify":
 							return this.app.vault.on("modify", w);
@@ -250,13 +252,16 @@ export default class NotionHubSyncPlugin extends Plugin {
 				configDir: () => this.app.vault.configDir,
 				/** Manual rounds stay available while paused — "pause" stops the
 				 * automatic ones only. */
-				request: async () => {
+				request: async (opts) => {
 					this.nextTrigger = "auto";
 					if (!(await this.syncDeps())) {
 						throw new Error("sync not configured");
 					}
 					try {
-						return await this.getRunner().request(false);
+						return await this.getRunner().request(
+							false,
+							opts?.forceAudit ?? false,
+						);
 					} catch (err) {
 						this.syncLog.error(
 							getStrings().logRoundFailed(
@@ -832,6 +837,13 @@ export default class NotionHubSyncPlugin extends Plugin {
 	 * reload; status UI always refreshes. */
 	private handleAutoReport(report: SyncReport): void {
 		const strings = getStrings();
+		// A revoked token is not "12 files failed": it is one problem the user
+		// can fix in ten seconds, and no automatic round will succeed until
+		// they do. Pause and say it once, instead of every five minutes.
+		if (report.authFailed) {
+			void this.pauseForAuthFailure();
+			return;
+		}
 		if (report.configWritten) this.notifyConfigReload();
 		if (report.failed > 0) {
 			const issues = [...report.failures, ...report.warnings];
@@ -940,6 +952,23 @@ export default class NotionHubSyncPlugin extends Plugin {
 		new Notice(
 			this.settings.paused ? strings.pausedNotice : strings.resumedNotice,
 		);
+		this.updateStatus();
+	}
+
+	/** Notion rejected the token: stop automatic rounds and name the cause.
+	 * Paused is a persisted setting, so it survives a restart — the user must
+	 * see why sync stopped, not find it silently resumed against a dead
+	 * token. Idempotent: a manual round may report the same failure again. */
+	private async pauseForAuthFailure(): Promise<void> {
+		const strings = getStrings();
+		const already = this.settings.paused;
+		if (!already) {
+			this.settings.paused = true;
+			await this.saveSettings();
+		}
+		this.syncLog.error(strings.authFailedNotice);
+		void this.syncLog.flush();
+		if (!already) new Notice(strings.authFailedNotice, 20000);
 		this.updateStatus();
 	}
 

@@ -4,6 +4,7 @@
 // follow-up round.
 
 import { basename } from "../sync/vault-io";
+import { NotionApiError } from "../notion/client";
 import { childDirOf } from "../sync/paths";
 import type { SyncDeps, SyncReport } from "../sync/deps";
 import { newReport } from "../sync/deps";
@@ -56,6 +57,20 @@ export interface EngineDeps extends SyncDeps {
 
 const hex = (id: string): string => id.replace(/-/g, "").toLowerCase();
 
+/** 401/403 = the integration token or the page permission is gone. Every
+ * later request would fail identically, so this is a round-stopping
+ * condition, not a per-file one. */
+function isAuthError(err: unknown): boolean {
+	return (
+		err instanceof NotionApiError &&
+		(err.status === 401 || err.status === 403)
+	);
+}
+
+function errMessage(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
 /** Log a milestone with an elapsed-time stamp. `log` is the bounded channel
  * (one line per phase); per-item detail goes to `debug`.
  *
@@ -87,7 +102,7 @@ function makeTrace(deps: SyncDeps): {
 
 export async function runSync(
 	deps: EngineDeps,
-	opts: { full: boolean },
+	opts: { full: boolean; forceAudit?: boolean },
 ): Promise<SyncReport> {
 	const report = newReport();
 	const state = deps.state;
@@ -187,16 +202,35 @@ export async function runSync(
 	// mandatory cost of re-matching by path, not an extra audit.
 	const coldStart = Object.keys(state.entries).length === 0;
 	tr.phase(
-		`phase scanRemote: full=${opts.full} forceAudit=${coldStart} roundRobin=${deps.engine.roundRobinPerRound}`,
+		`phase scanRemote: full=${opts.full} forceAudit=${coldStart || opts.forceAudit === true} roundRobin=${deps.engine.roundRobinPerRound}`,
 	);
-	const remoteSnap = await snapshotRemote(deps, {
-		full: opts.full,
-		forceAudit: coldStart,
-		roundRobinPerRound: deps.engine.roundRobinPerRound,
-		fullAuditHours: deps.engine.fullAuditHours,
-		links,
-		now,
-	});
+	let remoteSnap: Awaited<ReturnType<typeof snapshotRemote>>;
+	try {
+		remoteSnap = await snapshotRemote(deps, {
+			full: opts.full,
+			forceAudit: coldStart || opts.forceAudit === true,
+			roundRobinPerRound: deps.engine.roundRobinPerRound,
+			fullAuditHours: deps.engine.fullAuditHours,
+			links,
+			now,
+		});
+	} catch (err) {
+		// A rejected token surfaces HERE, on the first read of the journal —
+		// long before any file action. Letting it escape would reach the
+		// user as a bare error string, and the next automatic round would
+		// burn its request budget against the same wall five minutes later.
+		if (isAuthError(err)) {
+			report.authFailed = true;
+			report.failed++;
+			report.failures.push(errMessage(err));
+			report.warnings.push(
+				"Notion rejected the integration token (401/403) — automatic sync is paused until it is fixed in settings",
+			);
+			tr.log("round aborted: Notion rejected the token");
+			return report;
+		}
+		throw err;
+	}
 	if (remoteSnap.journalSeen.length > 0 || (state.journalSeen ?? []).length === 0) {
 		state.journalSeen = remoteSnap.journalSeen;
 	}
@@ -349,6 +383,21 @@ export async function runSync(
 			`of ${actions.length} (${pulls ? "download" : pushes ? "upload" : "apply"})`,
 	);
 	await applyActions(actions, ctx);
+	// A rejected token makes every remaining round a waste of the request
+	// budget, and a plain failure count hides the cause. Stop here, keep the
+	// base as it was (nothing was recorded as synced), and let the host
+	// pause auto-sync and name the problem.
+	if (report.authFailed) {
+		for (const k of Object.keys(state)) {
+			delete (state as unknown as Record<string, unknown>)[k];
+		}
+		Object.assign(state, before);
+		report.warnings.push(
+			"Notion rejected the integration token (401/403) — automatic sync is paused until it is fixed in settings",
+		);
+		tr.log("round aborted: Notion rejected the token");
+		return report;
+	}
 	tr.phase(
 		`phase apply done in ${tr.since()}: created=${report.created} updated=${report.updated} ` +
 			`skipped=${report.skipped} failed=${report.failed} blocked=${report.blocked.length} ` +
@@ -449,7 +498,7 @@ export async function runSync(
  * fetched lazily per round so settings/token changes apply immediately. */
 export class SyncRunner {
 	private running = false;
-	private pending: { full: boolean } | null = null;
+	private pending: { full: boolean; forceAudit: boolean } | null = null;
 	private lastReport: SyncReport | null = null;
 
 	constructor(
@@ -457,14 +506,19 @@ export class SyncRunner {
 		private readonly onReport?: (r: SyncReport, full: boolean) => void,
 		private readonly runRound: (
 			deps: EngineDeps,
-			opts: { full: boolean },
+			opts: { full: boolean; forceAudit?: boolean },
 		) => Promise<SyncReport> = runSync,
 	) {}
 
-	async request(full = false): Promise<SyncReport> {
+	/** `forceAudit` re-enumerates the whole remote tree even when the audit
+	 * timer has not expired — used after a directory-level rename/delete,
+	 * where an incremental round could read a moved subtree as "deleted". */
+	async request(full = false, forceAudit = false): Promise<SyncReport> {
 		if (this.running) {
 			this.pending = {
 				full: full || (this.pending?.full ?? false),
+				forceAudit:
+					forceAudit || (this.pending?.forceAudit ?? false),
 			};
 			// waiters get the follow-up round's report
 			while (this.running) {
@@ -473,6 +527,7 @@ export class SyncRunner {
 			return this.lastReport ?? newReport();
 		}
 		let wantFull = full;
+		let wantAudit = forceAudit;
 		do {
 			this.pending = null;
 			this.running = true;
@@ -481,14 +536,19 @@ export class SyncRunner {
 				if (deps) {
 					this.lastReport = await this.runRound(deps, {
 						full: wantFull,
+						forceAudit: wantAudit,
 					});
 					this.onReport?.(this.lastReport, wantFull);
 				}
 			} finally {
 				this.running = false;
 			}
-			const pend = this.pending as { full: boolean } | null;
+			const pend = this.pending as {
+				full: boolean;
+				forceAudit: boolean;
+			} | null;
 			wantFull = pend?.full ?? false;
+			wantAudit = pend?.forceAudit ?? false;
 		} while (this.pending !== null);
 		return this.lastReport ?? newReport();
 	}

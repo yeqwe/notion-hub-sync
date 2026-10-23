@@ -114,6 +114,11 @@ export interface SyncReport {
 	configWritten?: boolean;
 	/** Local conflict copies created this round (vault paths). */
 	conflictCopies: string[];
+	/** Set when Notion rejected our token (401/403). Automatic rounds must
+	 * stop: every following round would burn its request budget against the
+	 * same wall, and the user reads "failed: 12" instead of "the token was
+	 * revoked". `main` pauses auto-sync and says so. */
+	authFailed?: boolean;
 	/** Files skipped by policy, with the reason. Always surfaced in the UI:
 	 * a silently skipped file looks exactly like a synced one. */
 	blocked: BlockedPath[];

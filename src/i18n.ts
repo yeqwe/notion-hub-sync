@@ -206,6 +206,8 @@ export interface I18nStrings {
 	commandPauseSync: string;
 	commandResumeSync: string;
 	pausedNotice: string;
+	/** Shown when Notion rejected the token and auto-sync paused itself. */
+	authFailedNotice: string;
 	resumedNotice: string;
 	pausedLabel: string;
 	pausedTip: string;
@@ -512,6 +514,8 @@ const EN_STRINGS: I18nStrings = {
 	commandPauseSync: "Pause sync",
 	commandResumeSync: "Resume sync",
 	pausedNotice: "Sync paused — automatic rounds are off.",
+	authFailedNotice:
+		"Notion rejected the integration token (401/403). Sync paused — update the token in settings, then resume.",
 	resumedNotice: "Sync resumed.",
 	pausedLabel: "Paused",
 	pausedTip: "Sync is paused — no automatic rounds will run.",
@@ -849,6 +853,8 @@ const ZH_CN_STRINGS: I18nStrings = {
 	commandPauseSync: "暂停同步",
 	commandResumeSync: "继续同步",
 	pausedNotice: "同步已暂停，自动同步不会运行。",
+	authFailedNotice:
+		"Notion 拒绝了集成令牌（401/403）。同步已暂停 —— 请在设置中更新令牌后继续。",
 	resumedNotice: "同步已继续。",
 	pausedLabel: "已暂停",
 	pausedTip: "同步已暂停，不会自动运行。",
