@@ -961,7 +961,7 @@
 	justify-content: flex-start;
 }
 
-/* ---- settings: section headings + slider readout ---- */
+/* ---- settings: section headings + number fields ---- */
 
 /* Obsidian already spaces setting rows; a section heading only needs to open
    the gap above itself and mark the break. The first one sits flush with the
@@ -982,25 +982,25 @@
 	border-top: none;
 }
 
-/* the slider track shrinks so the readout has room on a narrow pane */
-.nhs-settings .setting-item-control .slider {
-	flex: 1 1 60%;
-	min-width: 80px;
-}
-
-/* Fixed width, right-aligned: without it the readout jitters horizontally
-   while dragging, because "5 分钟" and "10 分钟" are different widths. */
-.nhs-settings .nhs-slider-value {
-	flex: 0 0 auto;
-	min-width: 4.5em;
+/* Narrow and right-aligned: these hold two or three digits, and a full-width
+   box would read as "paste something long here". tabular-nums keeps the
+   digits from shifting as the number grows. */
+.nhs-settings .nhs-number-input {
+	width: 5em;
 	text-align: right;
 	font-variant-numeric: tabular-nums;
+}
+
+/* the unit sits after the box, muted so it reads as a label not a value */
+.nhs-settings .nhs-unit {
+	margin-left: 6px;
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 	white-space: nowrap;
 }
 
-/* mobile: the settings pane is one narrow column */
-.is-mobile .nhs-settings .setting-item-control .slider {
-	flex-basis: 50%;
+/* mobile: one narrow column, so the box keeps its size and the unit may wrap
+   under it rather than squeezing the input */
+.is-mobile .nhs-settings .nhs-number-input {
+	width: 4.5em;
 }

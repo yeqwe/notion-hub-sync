@@ -1,7 +1,7 @@
 // Settings-panel building blocks — the look, kept apart from
 // settings-tab.ts so that file stays a readable list of *what* the settings
 // are. Three primitives: a section heading, a row of toggle chips, and a
-// number slider with a live readout.
+// number field with the unit beside it.
 
 import type { Setting } from "obsidian";
 
@@ -108,17 +108,21 @@ export function addMultiSelect(
 	paint();
 }
 
-// ── number slider ───────────────────────────────────────────
-// A text field for "sync every N minutes" makes the user type a number and
-// then tells them nothing about the sane range. A slider shows the range and
-// the current value at once, and the unit moves out of the label into the
-// readout ("10 分钟"), so the name stays short.
+// ── number field ───────────────────────────────────────────
+// A slider was the wrong tool here: these ranges are wide (0–1440 minutes)
+// and the useful values are specific (5, 10, 30) — dragging one notch jumps
+// by dozens and landing on the number you want is luck. A small text box
+// with the unit beside it says exactly what it holds, and typing is exact.
+//
+// The box is deliberately forgiving: it does not reformat while you type
+// (typing "1", "0" toward "10" must not become "1" then "10" snapped back to
+// 1), and it commits on blur/Enter, so a half-typed number is never saved.
 
 /** Snap to the step grid and stay inside the limits.
  *
  * A persisted value can sit outside the range we now offer (older data.json,
- * a hand edit). A slider handed such a value either throws or renders in the
- * wrong place, so it is clamped on the way in. Pure, so the rule is testable. */
+ * a hand edit). Clamping on the way in keeps the field and the stored value
+ * from disagreeing. Pure, so the rule is testable. */
 export function clampToStep(
 	value: number,
 	min: number,
@@ -133,80 +137,83 @@ export function clampToStep(
 	return Math.min(max, Math.max(min, snapped));
 }
 
-/** `10` + `分钟` → `10 分钟`; an empty unit gives a bare number. */
-export function withUnit(n: number, unit: string): string {
-	return unit ? `${n} ${unit}` : String(n);
+/** What a typed string means as a number, or null if it means nothing.
+ *
+ * `Number("")` is 0 and `Number(" ")` is 0, which would silently turn an
+ * emptied field into "off". An empty box is not a zero — it is "no answer",
+ * and the caller restores the previous value instead. */
+export function parseNumberInput(raw: string): number | null {
+	const trimmed = raw.trim();
+	if (trimmed === "") return null;
+	const n = Number(trimmed);
+	return Number.isFinite(n) ? n : null;
 }
 
-/** The readout text. `offAtZero` exists because several of these sliders use
- * 0 as "disabled" (sync interval, retention guard) and "0 分钟" reads like a
- * broken setting rather than an intentional off switch. */
-export function sliderReadout(
-	n: number,
-	unit: string,
-	offAtZero?: string,
-): string {
-	if (n === 0 && offAtZero) return offAtZero;
-	return withUnit(n, unit);
+/** Hover text stating the accepted range — the one thing a text box cannot
+ * show by itself and a slider showed for free. */
+export function rangeHint(min: number, max: number, unit: string): string {
+	const span = `${min}–${max}`;
+	return unit ? `${span} ${unit}` : span;
 }
 
-export interface NumberSliderOptions {
+export interface NumberFieldOptions {
 	min: number;
 	max: number;
 	step: number;
 	value: number;
-	/** Readout text — the unit lives here, not in the setting name. */
-	format: (n: number) => string;
-	onInput: (n: number) => void;
-	/** Persist. Debounced, so one drag writes data.json once. */
-	save: () => void | Promise<void>;
-	/** Accessible name for the bare range input. */
+	/** Shown after the box ("分钟", "MB"); empty renders nothing. */
+	unit: string;
+	/** Accessible name for the input. */
 	ariaLabel?: string;
+	onInput: (n: number) => void;
+	/** Persist. Called once per committed edit, not per keystroke. */
+	save: () => void | Promise<void>;
 }
 
-const SAVE_DEBOUNCE_MS = 400;
+export function addNumberField(s: Setting, o: NumberFieldOptions): void {
+	const initial = clampToStep(o.value, o.min, o.max, o.step);
+	let current = initial;
 
-export function addNumberSlider(s: Setting, o: NumberSliderOptions): void {
-	let value = clampToStep(o.value, o.min, o.max, o.step);
-	// A stored value outside the range we now offer would otherwise sit in
-	// memory at the old number while the track shows the clamped one — the
-	// user would never learn their 2000 MB became 1000. Correct it once, here,
-	// without saving: opening a settings tab should not write data.json, and
-	// the next real edit persists the corrected value anyway.
-	if (value !== o.value) o.onInput(value);
-	let timer: number | null = null;
-	const scheduleSave = (): void => {
-		if (timer !== null) window.clearTimeout(timer);
-		timer = window.setTimeout(() => {
-			timer = null;
+	s.addText((text) => {
+		const el = text.inputEl;
+		// text + inputMode, not type=number: the native spinner sits on top of
+		// the unit label and a stray scroll wheel edits a setting.
+		el.type = "text";
+		el.inputMode = "numeric";
+		el.addClass("nhs-number-input");
+		el.setAttribute("aria-label", o.ariaLabel ?? "");
+		el.setAttribute("title", rangeHint(o.min, o.max, o.unit));
+		el.value = String(initial);
+
+		const commit = (): void => {
+			const parsed = parseNumberInput(el.value);
+			// Empty or nonsense: put the last good number back, save nothing.
+			const next =
+				parsed === null
+					? current
+					: clampToStep(parsed, o.min, o.max, o.step);
+			el.value = String(next);
+			if (next === current) return;
+			current = next;
+			o.onInput(next);
 			void o.save();
-		}, SAVE_DEBOUNCE_MS);
-	};
+		};
 
-	// A native range input carrying Obsidian's own `slider` class, rather than
-	// Setting.addSlider(): from 1.6 on, SliderComponent renders its own
-	// numeric readout next to the track, which would show "10" beside our
-	// "10 分钟". Owning the element means exactly one number on the row, and
-	// the `slider` class still picks up the theme's track and thumb.
-	const input = s.controlEl.createEl("input", {
-		cls: "slider",
-		type: "range",
-	});
-	input.min = String(o.min);
-	input.max = String(o.max);
-	input.step = String(o.step);
-	input.value = String(value);
-	input.setAttribute("aria-label", o.ariaLabel ?? "");
-
-	const readout = s.controlEl.createSpan({
-		cls: "nhs-slider-value",
-		text: o.format(value),
+		el.addEventListener("blur", commit);
+		el.addEventListener("keydown", (ev) => {
+			if (ev.key !== "Enter") return;
+			ev.preventDefault();
+			commit();
+			el.blur();
+		});
 	});
 
-	input.addEventListener("input", () => {
-		value = clampToStep(input.valueAsNumber, o.min, o.max, o.step);
-		readout.setText(o.format(value));
-		o.onInput(value);
-		scheduleSave();
-	});
+	if (o.unit) {
+		s.controlEl.createSpan({ cls: "nhs-unit", text: o.unit });
+	}
+
+	// A stored value outside the current range would otherwise sit in memory
+	// at the old number while the box shows the clamped one. Correct it once,
+	// without saving: opening a settings tab should not write data.json.
+	if (initial !== o.value) o.onInput(initial);
 }

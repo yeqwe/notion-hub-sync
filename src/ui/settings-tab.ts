@@ -6,9 +6,8 @@ import { normalizeExcludedFolders } from "../sync/scope";
 import type { ScopeSettings } from "../sync/scope";
 import {
 	addMultiSelect,
-	addNumberSlider,
+	addNumberField,
 	addSection,
-	sliderReadout,
 } from "./settings-sections";
 import type NotionHubSyncPlugin from "../main";
 
@@ -20,9 +19,10 @@ export class NotionHubSettingTab extends PluginSettingTab {
 		super(plugin.app, plugin);
 	}
 
-	/** One slider row. The unit lives in the readout, not the name, so the
-	 * name stays short and the range is visible without opening a tooltip. */
-	private numberSlider(
+	/** One number row: a small box plus the unit beside it. The unit lives
+	 * there rather than in the name, so the name stays short and no row reads
+	 * "同步间隔（分钟）" followed by a second "分钟". */
+	private numberField(
 		containerEl: HTMLElement,
 		name: string,
 		desc: string | null,
@@ -32,22 +32,20 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			step: number;
 			value: number;
 			unit: string;
-			/** Text shown at 0 instead of "0 …" — several sliders use 0 as off. */
-			offAtZero?: string;
 		},
 		write: (n: number) => void,
 	): void {
 		const s = new Setting(containerEl).setName(name);
 		if (desc) s.setDesc(desc);
-		addNumberSlider(s, {
+		addNumberField(s, {
 			min: opts.min,
 			max: opts.max,
 			step: opts.step,
 			value: opts.value,
-			format: (n) => sliderReadout(n, opts.unit, opts.offAtZero),
+			unit: opts.unit,
+			ariaLabel: name,
 			onInput: write,
 			save: () => this.plugin.saveSettings(),
-			ariaLabel: name,
 		});
 	}
 
@@ -199,7 +197,7 @@ export class NotionHubSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		this.numberSlider(
+		this.numberField(
 			containerEl,
 			strings.settingsMaxFileSize,
 			strings.settingsMaxFileSizeDescription,
@@ -228,7 +226,7 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			},
 		);
 
-		this.numberSlider(
+		this.numberField(
 			containerEl,
 			strings.settingsAutoSyncDebounce,
 			strings.settingsAutoSyncDebounceDescription,
@@ -244,7 +242,7 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			},
 		);
 
-		this.numberSlider(
+		this.numberField(
 			containerEl,
 			strings.settingsAutoSyncInterval,
 			strings.settingsAutoSyncIntervalDescription,
@@ -254,7 +252,6 @@ export class NotionHubSettingTab extends PluginSettingTab {
 				step: 1,
 				value: st.autoSyncIntervalMinutes,
 				unit: strings.unitMinutes,
-				offAtZero: strings.valueOff,
 			},
 			(n) => {
 				st.autoSyncIntervalMinutes = n;
@@ -294,7 +291,7 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			},
 		);
 
-		this.numberSlider(
+		this.numberField(
 			containerEl,
 			strings.settingsHistoryInterval,
 			strings.settingsHistoryIntervalDescription,
@@ -304,14 +301,13 @@ export class NotionHubSettingTab extends PluginSettingTab {
 				step: 1,
 				value: st.historyIntervalMinutes,
 				unit: strings.unitMinutes,
-				offAtZero: strings.valueOff,
 			},
 			(n) => {
 				st.historyIntervalMinutes = n;
 			},
 		);
 
-		this.numberSlider(
+		this.numberField(
 			containerEl,
 			strings.settingsHistoryMaxVersions,
 			null,
@@ -327,7 +323,7 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			},
 		);
 
-		this.numberSlider(
+		this.numberField(
 			containerEl,
 			strings.settingsHistoryRetentionDays,
 			null,
@@ -343,7 +339,7 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			},
 		);
 
-		this.numberSlider(
+		this.numberField(
 			containerEl,
 			strings.settingsFullAuditHours,
 			strings.settingsFullAuditHoursDescription,
@@ -417,7 +413,7 @@ export class NotionHubSettingTab extends PluginSettingTab {
 		// ── advanced ─────────────────────────────────────────
 		addSection(containerEl, strings.sectionAdvanced);
 
-		this.numberSlider(
+		this.numberField(
 			containerEl,
 			strings.settingsDeleteGuard,
 			strings.settingsDeleteGuardDescription,
@@ -427,7 +423,6 @@ export class NotionHubSettingTab extends PluginSettingTab {
 				step: 1,
 				value: st.deleteGuardThreshold,
 				unit: strings.unitFiles,
-				offAtZero: strings.valueOff,
 			},
 			(n) => {
 				st.deleteGuardThreshold = n;

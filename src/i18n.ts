@@ -45,8 +45,6 @@ export interface I18nStrings {
 	unitMB: string;
 	unitVersions: string;
 	unitFiles: string;
-	/** Slider readout when 0 means "off" rather than "zero". */
-	valueOff: string;
 	settingsHistoryInterval: string;
 	settingsHistoryIntervalDescription: string;
 	settingsHistoryMaxVersions: string;
@@ -303,13 +301,12 @@ const EN_STRINGS: I18nStrings = {
 	unitMB: "MB",
 	unitVersions: "versions",
 	unitFiles: "files",
-	valueOff: "Off",
-	settingsHistoryInterval: "Push version interval (minutes)",
+	settingsHistoryInterval: "Push version interval",
 	settingsHistoryIntervalDescription:
 		"Minimum minutes between push versions of the same file.",
 	settingsHistoryMaxVersions: "Max versions per file",
-	settingsHistoryRetentionDays: "Version retention (days)",
-	settingsFullAuditHours: "Full audit interval (hours)",
+	settingsHistoryRetentionDays: "Version retention",
+	settingsFullAuditHours: "Full audit interval",
 	settingsFullAuditHoursDescription:
 		"How often sync re-walks the whole Notion tree to catch missed changes.",
 	settingsConfigSync: "Sync Obsidian settings",
@@ -365,10 +362,10 @@ const EN_STRINGS: I18nStrings = {
 	settingsAutoSyncToggle: "Enable automatic sync",
 	settingsAutoSyncDescription:
 		"Sync automatically on vault changes, on an interval, on startup, and when the app returns to the foreground.",
-	settingsAutoSyncDebounce: "Change debounce (seconds)",
+	settingsAutoSyncDebounce: "Change debounce",
 	settingsAutoSyncDebounceDescription:
 		"Wait this long after the last vault change before syncing.",
-	settingsAutoSyncInterval: "Sync interval (minutes)",
+	settingsAutoSyncInterval: "Sync interval",
 	settingsAutoSyncIntervalDescription:
 		"Periodic sync interval. 0 disables interval sync.",
 	settingsSyncOnStartup: "Sync on startup",
@@ -377,7 +374,7 @@ const EN_STRINGS: I18nStrings = {
 	settingsSyncOnForeground: "Sync on foreground",
 	settingsSyncOnForegroundDescription:
 		"Sync when the app becomes visible again (mobile foreground).",
-	settingsMaxFileSize: "Max file size (MB)",
+	settingsMaxFileSize: "Max file size",
 	settingsMaxFileSizeDescription:
 		"Files larger than this are skipped and reported as blocked.",
 	commandShowStatus: "Show sync status",
@@ -656,12 +653,11 @@ const ZH_CN_STRINGS: I18nStrings = {
 	unitMB: "MB",
 	unitVersions: "个版本",
 	unitFiles: "个文件",
-	valueOff: "关闭",
-	settingsHistoryInterval: "推送版本间隔（分钟）",
+	settingsHistoryInterval: "推送版本间隔",
 	settingsHistoryIntervalDescription: "同一文件两次推送版本之间的最小分钟数。",
 	settingsHistoryMaxVersions: "每个文件的最大版本数",
-	settingsHistoryRetentionDays: "版本保留天数",
-	settingsFullAuditHours: "完整检查间隔（小时）",
+	settingsHistoryRetentionDays: "版本保留时长",
+	settingsFullAuditHours: "完整检查间隔",
 	settingsFullAuditHoursDescription:
 		"每隔多久重新遍历整个 Notion 树，捕捉遗漏的变更。",
 	settingsConfigSync: "同步 Obsidian 设置",
@@ -714,15 +710,15 @@ const ZH_CN_STRINGS: I18nStrings = {
 	settingsAutoSyncToggle: "启用自动同步",
 	settingsAutoSyncDescription:
 		"在文件变更、定时、启动和应用回到前台时自动同步。",
-	settingsAutoSyncDebounce: "变更防抖（秒）",
+	settingsAutoSyncDebounce: "变更防抖",
 	settingsAutoSyncDebounceDescription: "最后一次文件变更后等待这么久再同步。",
-	settingsAutoSyncInterval: "同步间隔（分钟）",
+	settingsAutoSyncInterval: "同步间隔",
 	settingsAutoSyncIntervalDescription: "定时同步间隔，0 表示关闭。",
 	settingsSyncOnStartup: "启动时同步",
 	settingsSyncOnStartupDescription: "Obsidian 启动后不久运行一次同步。",
 	settingsSyncOnForeground: "回到前台时同步",
 	settingsSyncOnForegroundDescription: "应用重新可见时同步（移动端前台）。",
-	settingsMaxFileSize: "最大文件大小（MB）",
+	settingsMaxFileSize: "最大文件大小",
 	settingsMaxFileSizeDescription: "超过此大小的文件将被跳过并标记为受阻。",
 	commandShowStatus: "显示同步状态",
 	statusTitle: "同步状态",
