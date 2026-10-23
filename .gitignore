@@ -1,0 +1,11 @@
+node_modules
+main.js
+data.json
+.env.local
+probe/out/
+
+# 本地参考代码 / 临时产物
+学习项目/
+.obsidian/
+*.log
+.DS_Store

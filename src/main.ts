@@ -1,0 +1,832 @@
+import {
+	Notice,
+	Platform,
+	Plugin,
+	TFile,
+	TFolder,
+	type WorkspaceLeaf,
+} from "obsidian";
+import { testConnection } from "./connection";
+import { getStrings } from "./i18n";
+import { NotionClient } from "./notion/client";
+import { parseNotionId } from "./notion/ids";
+import {
+	DEFAULT_SETTINGS,
+	ROUND_ROBIN_PER_ROUND,
+	type NotionHubSettings,
+} from "./settings";
+import {
+	loadState,
+	makePathResolver,
+	ObsidianVaultIO,
+	saveState,
+} from "./sync/obsidian-vault";
+import { entryByPath } from "./sync/state";
+import type { SyncState } from "./sync/state";
+import type { SyncEvent, SyncReport } from "./sync/deps";
+import type { EngineDeps } from "./engine/sync";
+import { SyncRunner } from "./engine/sync";
+import { BaseStore, type TextIO } from "./engine/base-store";
+import { ObsidianConfigIO } from "./config/config-io";
+import { NotionHubSettingTab } from "./ui/settings-tab";
+import { openHistoryModal } from "./ui/history-modal";
+import { openDeletedFilesModal } from "./ui/deleted-files-modal";
+import { openStatusModal } from "./ui/status-modal";
+import { confirmAction } from "./ui/confirm-modal";
+import { confirmLocalDeletes } from "./ui/confirm-delete-modal";
+import { clearRemote, resetState } from "./engine/reset";
+import { SyncLog } from "./sync/sync-log";
+import {
+	SYNC_PANEL_VIEW,
+	SyncPanelView,
+	type SyncPanelDeps,
+} from "./ui/sync-panel-view";
+import { autoSyncIgnoresPath, wireAutoSync } from "./auto-sync";
+
+export default class NotionHubSyncPlugin extends Plugin {
+	settings: NotionHubSettings = { ...DEFAULT_SETTINGS };
+	private statusEl: HTMLElement | null = null;
+	private ribbonEl: HTMLElement | null = null;
+	private state: SyncState | null = null;
+	private io: ObsidianVaultIO | null = null;
+	private runner: SyncRunner | null = null;
+	private syncing = false;
+	private readonly syncLog = new SyncLog({
+		persist: (entries) =>
+			this.app.vault.adapter.write(
+				`${this.manifest.dir ?? ""}/sync-log.json`,
+				JSON.stringify(entries),
+			),
+	});
+	private nextTrigger: "manual" | "full" | "auto" = "manual";
+	private roundStartAt = 0;
+
+	async onload(): Promise<void> {
+		await this.loadSettings();
+		this.addSettingTab(new NotionHubSettingTab(this));
+		this.statusEl = this.addStatusBarItem();
+		this.statusEl.addClass("nhs-status-clickable");
+		this.statusEl.addEventListener("click", () => void this.openPanel());
+		this.registerView(
+			SYNC_PANEL_VIEW,
+			(leaf) => new SyncPanelView(leaf, this.panelDeps()),
+		);
+		await this.loadSyncLog();
+
+		const strings = getStrings();
+		this.ribbonEl = this.addRibbonIcon("refresh-cw", "Notion Hub Sync", () =>
+			this.runEngine(false),
+		);
+		this.addRibbonIcon("activity", strings.panelTitle, () =>
+			void this.openPanel(),
+		);
+		this.addCommand({
+			id: "open-sync-panel",
+			name: strings.commandOpenPanel,
+			callback: () => void this.openPanel(),
+		});
+		this.addCommand({
+			id: "show-sync-status",
+			name: strings.commandShowStatus,
+			callback: () =>
+				openStatusModal({
+					app: this.app,
+					state: this.state,
+					onSyncNow: () => this.runEngine(false),
+					onFullSync: () => this.runEngine(true),
+				}),
+		});
+		this.addCommand({
+			id: "test-connection",
+			name: strings.commandTestConnection,
+			callback: async () => {
+				const result = await testConnection(this.settings);
+				if (result.ok) {
+					new Notice(
+						strings.connectionSuccess(
+							result.botName,
+							result.pageTitle,
+						),
+					);
+				} else {
+					new Notice(result.message);
+				}
+			},
+		});
+		this.addCommand({
+			id: "sync-now",
+			name: strings.commandSyncNow,
+			callback: () => this.runEngine(false),
+		});
+		this.addCommand({
+			id: "full-sync",
+			name: strings.commandFullSync,
+			callback: () => this.runEngine(true),
+		});
+		this.addCommand({
+			id: "show-version-history",
+			name: strings.commandShowHistory,
+			callback: () => {
+				const file = this.app.workspace.getActiveFile();
+				if (file) {
+					void this.openHistory(file.path);
+				}
+			},
+		});
+		this.addCommand({
+			id: "show-deleted-files",
+			name: strings.commandDeletedFiles,
+			callback: () => void this.openDeletedFiles(),
+		});
+		this.addCommand({
+			id: "reset-sync-state",
+			name: strings.commandResetState,
+			callback: () => void this.resetSyncState(),
+		});
+		this.addCommand({
+			id: "reupload-from-local",
+			name: strings.commandReupload,
+			callback: () => void this.reuploadFromLocal(),
+		});
+		this.registerEvent(
+			this.app.workspace.on("file-menu", (menu, file) => {
+				if (!(file instanceof TFile)) return;
+				const st = this.state;
+				if (!st || !entryByPath(st, file.path)) return;
+				menu.addItem((item) => {
+					item.setIcon("history")
+						.setTitle(getStrings().menuVersionHistory)
+						.onClick(() => void this.openHistory(file.path));
+				});
+			}),
+		);
+
+		// preload state so the file-menu can check entries
+		const rootId = parseNotionId(this.settings.rootPage);
+		if (rootId && this.settings.token.trim()) {
+			this.state = await loadState(
+				this.app,
+				this.manifest.dir ?? "",
+				rootId,
+			);
+			this.updateStatus();
+		}
+
+		// rename hints: local renames between rounds become base-path remaps
+		this.registerEvent(
+			this.app.vault.on("rename", (file, oldPath) => {
+				// engine-caused renames are consumed, not hinted
+				if (this.io?.renames.consume(oldPath, file.path)) return;
+				const st = this.state;
+				if (!st || autoSyncIgnoresPath(oldPath, this.app.vault.configDir))
+					return;
+				const isFolder = file instanceof TFolder;
+				st.renameHints = st.renameHints ?? [];
+				st.renameHints.push({ from: oldPath, to: file.path });
+				if (!isFolder) {
+					// entry paths update immediately too
+					const found = entryByPath(st, oldPath);
+					if (found) found.entry.path = file.path;
+				}
+				const state = st;
+				void saveState(this.app, this.manifest.dir ?? "", state);
+			}),
+		);
+
+		// automatic triggers (debounced changes, interval, startup, foreground)
+		wireAutoSync(
+			{
+				registerEvent: (ref) => this.registerEvent(ref as never),
+				registerInterval: (id) => this.registerInterval(id),
+				registerDomEvent: (el, type, cb) =>
+					this.registerDomEvent(
+						el,
+						type as "visibilitychange",
+						cb,
+					),
+				onVaultEvent: (type, cb) => {
+					const w = (f: { path: string }, o?: string) =>
+						cb(f.path, o);
+					switch (type) {
+						case "modify":
+							return this.app.vault.on("modify", w);
+						case "create":
+							return this.app.vault.on("create", w);
+						case "delete":
+							return this.app.vault.on("delete", w);
+						default:
+							return this.app.vault.on("rename", w);
+					}
+				},
+				onLayoutReady: (cb) => this.app.workspace.onLayoutReady(cb),
+			},
+			{
+				getSettings: () => this.settings,
+				getState: () => this.state,
+				getVaultIO: () => this.io,
+				configDir: () => this.app.vault.configDir,
+				request: async () => {
+					this.nextTrigger = "auto";
+					if (!(await this.syncDeps())) {
+						throw new Error("sync not configured");
+					}
+					try {
+						return await this.getRunner().request(false);
+					} catch (err) {
+						this.syncLog.error(
+							getStrings().logRoundFailed(
+								err instanceof Error
+									? err.message
+									: String(err),
+							),
+						);
+						void this.syncLog.flush();
+						this.setSyncing(false);
+						throw err;
+					}
+				},
+				onReport: (r) => this.handleAutoReport(r),
+			},
+		);
+	}
+
+	private async historyDeps() {
+		const deps = await this.syncDeps();
+		if (!deps) return null;
+		return {
+			app: this.app,
+			client: deps.client,
+			state: deps.state,
+			saveState: deps.saveState,
+			deviceId: deps.deviceId,
+			history: deps.history!,
+			historyPageCache: deps.historyPageCache,
+			vault: deps.vault,
+			log: deps.log,
+		};
+	}
+
+	private async openHistory(path: string): Promise<void> {
+		const strings = getStrings();
+		const deps = await this.historyDeps();
+		if (!deps) return;
+		const found = entryByPath(deps.state, path);
+		if (!found) {
+			new Notice(strings.historyNotSynced);
+			return;
+		}
+		openHistoryModal(deps, path);
+	}
+
+	private async openDeletedFiles(): Promise<void> {
+		const deps = await this.historyDeps();
+		if (!deps) return;
+		openDeletedFilesModal(deps);
+	}
+
+	private adapterIO(dir: string): TextIO {
+		const adapter = this.app.vault.adapter;
+		return {
+			read: (p) => adapter.read(p),
+			write: async (p, c) => {
+				const idx = p.lastIndexOf("/");
+				if (idx > 0) {
+					await adapter.mkdir(p.slice(0, idx)).catch(() => undefined);
+				}
+				await adapter.write(p, c);
+			},
+			remove: (p) =>
+				adapter.exists(p).then((yes) =>
+					yes ? adapter.remove(p) : Promise.resolve(),
+				),
+		};
+	}
+
+	private async syncDeps(): Promise<EngineDeps | null> {
+		const strings = getStrings();
+		const rootId = parseNotionId(this.settings.rootPage);
+		if (!this.settings.token.trim() || !rootId) {
+			new Notice(strings.missingToken);
+			return null;
+		}
+		if (!this.state || this.state.rootPageId !== rootId) {
+			this.state = await loadState(
+				this.app,
+				this.manifest.dir ?? "",
+				rootId,
+			);
+		}
+		const state = this.state;
+		this.io = this.io ?? new ObsidianVaultIO(this.app);
+		return {
+			vault: this.io,
+			client: new NotionClient({ token: this.settings.token.trim() }),
+			state,
+			saveState: () =>
+				saveState(this.app, this.manifest.dir ?? "", state),
+			resolvePath: makePathResolver(this.app),
+			deviceId: this.settings.deviceId,
+			history: {
+				enabled: this.settings.historyEnabled,
+				intervalMinutes: this.settings.historyIntervalMinutes,
+				maxVersions: this.settings.historyMaxVersions,
+				retentionDays: this.settings.historyRetentionDays,
+			},
+			historyPageCache: new Map(),
+			baseStore: new BaseStore(
+				this.adapterIO(this.manifest.dir ?? ""),
+				this.manifest.dir ?? "",
+			),
+			configIO: new ObsidianConfigIO(this.app, this.app.vault.configDir),
+			configSync: this.settings.configSync,
+			selfId: this.manifest.id,
+			isMobile: Platform.isMobile,
+			engine: {
+				fullAuditHours: this.settings.fullAuditHours,
+				roundRobinPerRound: ROUND_ROBIN_PER_ROUND,
+				maxFileSizeMB: this.settings.maxFileSizeMB,
+				deleteGuardThreshold: this.settings.deleteGuardThreshold,
+			},
+			confirmLocalDeletes: (paths) => this.guardLocalDeletes(paths),
+			log: (m) => {
+				console.warn(`[notion-hub-sync] ${m}`);
+				if (/warning|fail|error/i.test(m)) this.syncLog.warn(m);
+			},
+			progress: (done, total) => {
+				this.statusEl?.setText(
+					`NHS ${getStrings().syncProgress(done, total)}`,
+				);
+			},
+			event: (ev) => this.onSyncEvent(ev),
+		};
+	}
+
+	/** Bulk local-delete confirmation via modal; logs the decision. */
+	private async guardLocalDeletes(
+		paths: string[],
+	): Promise<"delete" | "keep" | "cancel"> {
+		const strings = getStrings();
+		const choice = await confirmLocalDeletes(this.app, paths);
+		this.syncLog.warn(
+			choice === "delete"
+				? strings.logGuardDeleted(paths.length)
+				: choice === "keep"
+					? strings.logGuardKept(paths.length)
+					: strings.logGuardCancelled(paths.length),
+		);
+		void this.syncLog.flush();
+		return choice;
+	}
+
+	private triggerLabel(): string {
+		const strings = getStrings();
+		return this.nextTrigger === "full"
+			? strings.triggerFull
+			: this.nextTrigger === "auto"
+				? strings.triggerAuto
+				: strings.triggerManual;
+	}
+
+	private getRunner(): SyncRunner {
+		this.runner =
+			this.runner ??
+			new SyncRunner(
+				async () => {
+					this.setSyncing(true);
+					this.roundStartAt = Date.now();
+					this.syncLog.info(
+						getStrings().logRoundStarted(this.triggerLabel()),
+					);
+					return this.syncDeps();
+				},
+				(r) => this.logRound(r),
+			);
+		return this.runner;
+	}
+
+	/** Record a finished round in the panel log, then persist. */
+	private logRound(r: SyncReport): void {
+		const strings = getStrings();
+		for (const w of r.warnings) this.syncLog.warn(w);
+		for (const c of r.conflictCopies) {
+			this.syncLog.warn(strings.logConflictCopy(c), c);
+		}
+		for (const b of r.blocked) {
+			this.syncLog.warn(strings.logBlocked(b), b);
+		}
+		const secs = ((Date.now() - this.roundStartAt) / 1000).toFixed(1);
+		const summary = `${strings.syncDone(
+			r.created,
+			r.updated,
+			r.skipped,
+			r.failed,
+		)} · ${secs}s`;
+		if (r.failed === 0) {
+			this.syncLog.success(summary);
+		} else {
+			this.syncLog.error(summary);
+		}
+		void this.syncLog.flush();
+		this.setSyncing(false);
+	}
+
+	/** Engine activity → sync log + panel progress. */
+	private onSyncEvent(ev: SyncEvent): void {
+		const strings = getStrings();
+		switch (ev.t) {
+			case "phase": {
+				const text =
+					ev.phase === "scanLocal"
+						? strings.phaseScanLocal
+						: ev.phase === "scanRemote"
+							? strings.phaseScanRemote
+							: ev.phase === "plan"
+								? ev.count && ev.count > 0
+									? strings.phasePlan(ev.count)
+									: strings.phasePlanEmpty
+								: ev.phase === "config"
+									? strings.phaseConfig
+									: strings.phaseJournal;
+				this.syncLog.info(text);
+				this.forEachPanel((v) => v.setActivity(text));
+				break;
+			}
+			case "action": {
+				const verb = strings.actionVerb(ev.action);
+				const line = `[${ev.done}/${ev.total}] ${verb} ${ev.path}`;
+				// apply.ts emits this after applyOne, so `ok` distinguishes a
+				// finished action from one that failed (actionFailed follows).
+				if (ev.ok) this.syncLog.success(line, ev.path);
+				else this.syncLog.error(line, ev.path);
+				this.forEachPanel((v) =>
+					v.setProgress(ev.done, ev.total, `${verb} ${ev.path}`),
+				);
+				break;
+			}
+			case "actionFailed": {
+				this.syncLog.error(
+					strings.logActionFailed(
+						strings.actionVerb(ev.action),
+						ev.path,
+						ev.error,
+					),
+					ev.path,
+				);
+				break;
+			}
+			case "scan": {
+				const text =
+					ev.stage === "local"
+						? strings.scanHashed(ev.done, ev.total ?? 0)
+						: ev.stage === "walk"
+							? strings.scanWalked(ev.done)
+							: strings.scanEvaluating(ev.done, ev.total ?? 0);
+				this.statusEl?.setText(
+					ev.total !== undefined
+						? `NHS ${ev.done}/${ev.total}`
+						: `NHS ${ev.done}`,
+				);
+				const label = `${text} · ${ev.label}`;
+				if (ev.total !== undefined) {
+					this.forEachPanel((v) =>
+						v.setProgress(ev.done, ev.total!, label),
+					);
+				} else {
+					this.forEachPanel((v) => v.setActivity(label));
+				}
+				break;
+			}
+			case "upload": {
+				if (ev.parts > 1) {
+					const text = strings.logUploadPart(
+						ev.part,
+						ev.parts,
+						ev.path,
+					);
+					this.syncLog.success(text, ev.path);
+					this.forEachPanel((v) =>
+						v.setProgress(ev.part, ev.parts, text),
+					);
+				} else {
+					this.syncLog.success(
+						strings.logUploaded(ev.path, formatSize(ev.bytes)),
+						ev.path,
+					);
+				}
+				break;
+			}
+		}
+	}
+
+	private panelDeps(): SyncPanelDeps {
+		return {
+			log: this.syncLog,
+			getState: () => this.state,
+			isSyncing: () => this.syncing,
+			onOpenPath: (path) => this.openVaultPath(path),
+			onSyncNow: () => void this.runEngine(false),
+			onFullSync: () => void this.runEngine(true),
+			onOpenStatus: () =>
+				openStatusModal({
+					app: this.app,
+					state: this.state,
+					onSyncNow: () => this.runEngine(false),
+					onFullSync: () => this.runEngine(true),
+				}),
+			onOpenHistory: () => {
+				const file = this.app.workspace.getActiveFile();
+				if (file) void this.openHistory(file.path);
+			},
+			onDeletedFiles: () => void this.openDeletedFiles(),
+		};
+	}
+
+	/** Log-row click: open the file (or reveal the folder) in Obsidian. */
+	private openVaultPath(path: string): void {
+		const strings = getStrings();
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!file) {
+			new Notice(strings.logPathMissing(path));
+			return;
+		}
+		if (!(file instanceof TFile)) {
+			// folders have no view — reveal the node in the file explorer
+			const explorer = this.app.workspace.getLeavesOfType(
+				"file-explorer",
+			)[0];
+			if (explorer) {
+				void this.app.workspace.revealLeaf(explorer);
+				(
+					explorer.view as unknown as {
+						revealInFolder?: (folder: TFolder) => void;
+					}
+				).revealInFolder?.(file as TFolder);
+			}
+			return;
+		}
+		// already open somewhere → focus it instead of stacking tabs
+		let open: WorkspaceLeaf | null = null;
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			const view = leaf.view as unknown as { file?: TFile };
+			if (view.file?.path === path) open = leaf;
+		});
+		if (open) {
+			this.app.workspace.setActiveLeaf(open, { focus: true });
+			return;
+		}
+		void this.app.workspace.getLeaf("tab").openFile(file);
+	}
+
+	private async openPanel(): Promise<void> {
+		let leaf =
+			this.app.workspace.getLeavesOfType(SYNC_PANEL_VIEW)[0] ?? null;
+		if (!leaf) {
+			leaf = this.app.workspace.getRightLeaf(false);
+			if (!leaf) return;
+			await leaf.setViewState({ type: SYNC_PANEL_VIEW, active: true });
+		}
+		void this.app.workspace.revealLeaf(leaf);
+	}
+
+	private forEachPanel(fn: (view: SyncPanelView) => void): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(
+			SYNC_PANEL_VIEW,
+		)) {
+			if (leaf.view instanceof SyncPanelView) fn(leaf.view);
+		}
+	}
+
+	private async loadSyncLog(): Promise<void> {
+		try {
+			const path = `${this.manifest.dir ?? ""}/sync-log.json`;
+			if (await this.app.vault.adapter.exists(path)) {
+				this.syncLog.load(
+					JSON.parse(await this.app.vault.adapter.read(path)),
+				);
+			}
+		} catch {
+			// missing or corrupt log file — start fresh
+		}
+	}
+
+	/** Command: clear this device's sync record, then re-match by path. */
+	private async resetSyncState(): Promise<void> {
+		const strings = getStrings();
+		if (this.syncing) {
+			new Notice(strings.noticeSyncBusy);
+			return;
+		}
+		if (
+			!(await confirmAction(this.app, {
+				title: strings.commandResetState,
+				text: strings.confirmResetStateText,
+			}))
+		) {
+			return;
+		}
+		const deps = await this.syncDeps();
+		if (!deps) return;
+		resetState(deps.state);
+		await deps.saveState();
+		this.syncLog.warn(strings.logResetState);
+		void this.syncLog.flush();
+		this.updateStatus();
+		void this.runEngine(true);
+	}
+
+	/** Command: trash every page under the Notion root, then re-upload. */
+	private async reuploadFromLocal(): Promise<void> {
+		const strings = getStrings();
+		if (this.syncing) {
+			new Notice(strings.noticeSyncBusy);
+			return;
+		}
+		if (
+			!(await confirmAction(this.app, {
+				title: strings.commandReupload,
+				text: strings.confirmReuploadText,
+				warning: true,
+			}))
+		) {
+			return;
+		}
+		const deps = await this.syncDeps();
+		if (!deps) return;
+		this.setSyncing(true);
+		try {
+			const n = await clearRemote(
+				{ client: deps.client, state: deps.state },
+				(done, total) =>
+					this.forEachPanel((v) =>
+						v.setProgress(done, total, strings.commandReupload),
+					),
+			);
+			this.syncLog.info(strings.logClearRemote(n));
+		} catch (err) {
+			this.setSyncing(false);
+			new Notice(
+				strings.connectionFailed(
+					err instanceof Error ? err.message : String(err),
+				),
+			);
+			return;
+		}
+		resetState(deps.state);
+		await deps.saveState();
+		this.setSyncing(false);
+		void this.runEngine(true);
+	}
+
+	private async runEngine(full: boolean): Promise<void> {
+		const strings = getStrings();
+		if (!(await this.syncDeps())) {
+			return; // missing config — syncDeps already Noticed
+		}
+		this.nextTrigger = full ? "full" : "manual";
+		this.setSyncing(true);
+		new Notice(strings.syncStarted);
+		try {
+			const report: SyncReport = await this.getRunner().request(full);
+			const summary = strings.syncDone(
+				report.created,
+				report.updated,
+				report.skipped,
+				report.failed,
+			);
+			const issues = [...report.failures, ...report.warnings];
+			const tail =
+				issues.length > 0
+					? `\n${issues.slice(0, 5).join("\n")}`
+					: "";
+			new Notice(`${summary}${tail}`, 15000);
+			if (report.configWritten) {
+				this.notifyConfigReload();
+			}
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			this.syncLog.error(strings.logRoundFailed(msg));
+			void this.syncLog.flush();
+			new Notice(strings.connectionFailed(msg));
+		} finally {
+			this.setSyncing(false);
+		}
+	}
+
+	/** Silent auto rounds: Notice only on failures / conflicts / config
+	 * reload; status UI always refreshes. */
+	private handleAutoReport(report: SyncReport): void {
+		const strings = getStrings();
+		if (report.configWritten) this.notifyConfigReload();
+		if (report.failed > 0) {
+			const issues = [...report.failures, ...report.warnings];
+			new Notice(
+				`${strings.syncDone(report.created, report.updated, report.skipped, report.failed)}` +
+					(issues.length > 0 ? `\n${issues.slice(0, 5).join("\n")}` : ""),
+				15000,
+			);
+		}
+		if (report.conflictCopies.length > 0) {
+			new Notice(strings.conflictNotice(report.conflictCopies.length), 15000);
+		}
+		if (report.blocked.length > 0) {
+			new Notice(strings.blockedNotice(report.blocked.length), 15000);
+		}
+		this.forEachPanel((v) => v.hideProgress());
+		this.updateStatus();
+	}
+
+	private setSyncing(on: boolean): void {
+		this.syncing = on;
+		if (!on) this.forEachPanel((v) => v.hideProgress());
+		this.updateStatus();
+	}
+
+	private updateStatus(): void {
+		const strings = getStrings();
+		this.forEachPanel((v) => v.refresh());
+		const st = this.state;
+		if (this.syncing) {
+			this.statusEl?.setText("NHS …");
+			this.ribbonEl?.addClass("nhs-ribbon-spinning");
+			this.ribbonEl?.setAttribute("aria-label", strings.statusRunning);
+			this.ribbonEl?.setAttribute("title", strings.statusRunning);
+			return;
+		}
+		this.ribbonEl?.removeClass("nhs-ribbon-spinning");
+		const last = st?.lastSyncAt;
+		const failed = (st?.lastReport?.failed ?? 0) > 0;
+		const conflicts = st?.lastReport?.conflictCopies.length ?? 0;
+		this.ribbonEl?.toggleClass("nhs-ribbon-warn", failed || conflicts > 0);
+		const time = last
+			? new Date(last).toLocaleTimeString([], {
+					hour: "2-digit",
+					minute: "2-digit",
+				})
+			: null;
+		const tip = failed
+			? strings.statusTipFailed
+			: conflicts > 0
+				? strings.statusTipConflicts(conflicts)
+				: time
+					? strings.statusTipIdle(time)
+					: "Notion Hub Sync";
+		this.ribbonEl?.setAttribute("aria-label", tip);
+		this.ribbonEl?.setAttribute("title", tip);
+		this.statusEl?.setText(
+			time ? strings.syncDoneAt(time) : "",
+		);
+	}
+
+	/** Notice with a Reload button — never auto-reloads. */
+	private notifyConfigReload(): void {
+		const strings = getStrings();
+		const frag = document.createDocumentFragment();
+		frag.appendText(strings.configReloadNotice + " ");
+		const btn = frag.createEl("button", { text: strings.configReloadButton });
+		btn.addEventListener("click", () => {
+			// app.commands is not in the public typings but is stable API
+			(
+				this.app as unknown as {
+					commands: { executeCommandById(id: string): void };
+				}
+			).commands.executeCommandById("app:reload");
+		});
+		new Notice(frag, 0);
+	}
+
+	async loadSettings(): Promise<void> {
+		const saved = await this.loadData();
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+		this.settings.configSync = Object.assign(
+			{},
+			DEFAULT_SETTINGS.configSync,
+			saved?.configSync,
+		);
+		if (!this.settings.deviceId) {
+			this.settings.deviceId = newDeviceId();
+			await this.saveSettings();
+		}
+	}
+
+	async saveSettings(): Promise<void> {
+		await this.saveData(this.settings);
+	}
+}
+
+function formatSize(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** crypto.randomUUID fallback for older iOS WebViews (< 15.4). */
+function newDeviceId(): string {
+	if (typeof crypto !== "undefined" && crypto.randomUUID) {
+		return crypto.randomUUID();
+	}
+	const hex = () =>
+		Math.floor(Math.random() * 0xffffffff)
+			.toString(16)
+			.padStart(8, "0");
+	return `${hex().slice(0, 8)}-${hex().slice(0, 4)}-4${hex().slice(1, 4)}-8${hex().slice(1, 4)}-${hex()}${hex().slice(0, 4)}`;
+}

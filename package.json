@@ -1,0 +1,31 @@
+{
+	"name": "notion-hub-sync",
+	"version": "0.1.0",
+	"description": "Sync your whole vault across devices through a Notion page tree.",
+	"main": "main.js",
+	"type": "module",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"test": "vitest run",
+		"test:live": "vitest run -c vitest.live.config.ts",
+		"probe": "node scripts/probe-markdown.mjs"
+	},
+	"keywords": [
+		"obsidian",
+		"notion",
+		"sync"
+	],
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "24.19.2",
+		"esbuild": "0.28.2",
+		"obsidian": "1.14.4",
+		"tslib": "2.8.1",
+		"typescript": "5.9.3",
+		"vitest": "5.0.3"
+	},
+	"dependencies": {
+		"diff": "9.0.0"
+	}
+}

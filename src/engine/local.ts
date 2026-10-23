@@ -1,0 +1,215 @@
+// Local snapshot: what the vault looks like now, expressed against the
+// base (sync-state) entries. Rename hints + prefix remap resolve base
+// paths to current paths; mtimes let unchanged files reuse their sha.
+
+import { sha256Hex } from "../sync/hashes";
+import {
+	basename,
+	isSyncablePath,
+	parentDir,
+	type VaultFile,
+	type VaultIO,
+} from "../sync/vault-io";
+import type { SyncState, SyncEntry } from "../sync/state";
+import { childDirOf } from "../sync/paths";
+import type { LocalAdded, ParentRef, Side } from "./types";
+
+export interface LocalSnapshot {
+	/** id → evaluated side (only evaluated ids present). */
+	local: Record<string, Side>;
+	localAdded: LocalAdded[];
+	/** id → current local path after hints (all base ids). */
+	pathOf: Map<string, string>;
+	/** dir path → base folder id ("root" for vault root). */
+	folderIdByPath: Map<string, string>;
+	/** claimed paths (base ids + matched renames). */
+	claimed: Set<string>;
+}
+
+/** Apply rename hints in order; folder hints remap path prefixes. */
+export function applyRenameHints(
+	path: string,
+	hints: Array<{ from: string; to: string }>,
+): string {
+	let p = path;
+	for (const h of hints) {
+		if (p === h.to || p.startsWith(`${h.to}/`)) continue;
+		if (p === h.from) {
+			p = h.to;
+		} else if (p.startsWith(`${h.from}/`)) {
+			p = h.to + p.slice(h.from.length);
+		}
+	}
+	return p;
+}
+
+export async function snapshotLocal(
+	vault: VaultIO,
+	state: SyncState,
+	/** throttled callback while hashing files (done = files hashed). */
+	onProgress?: (done: number, total: number, path: string) => void,
+): Promise<LocalSnapshot> {
+	const hints = state.renameHints ?? [];
+	const { files, folders } = await vault.list();
+	const fileByPath = new Map<string, VaultFile>();
+	for (const f of files) {
+		if (isSyncablePath(f.path)) fileByPath.set(f.path, f);
+	}
+	const folderSet = new Set(
+		folders.filter((f) => isSyncablePath(f) && f !== ""),
+	);
+
+	// current local path for every base id (rename hints applied)
+	const pathOf = new Map<string, string>();
+	const folderIdByPath = new Map<string, string>([["", "root"]]);
+	for (const [id, e] of Object.entries(state.entries)) {
+		const p = applyRenameHints(e.path, hints);
+		pathOf.set(id, p);
+		if (e.kind === "folder") folderIdByPath.set(p, id);
+	}
+
+	const parentRefFor = (dir: string): ParentRef => {
+		if (dir === "") return { id: "root" };
+		const folderId = folderIdByPath.get(dir);
+		return folderId ? { id: folderId } : { newLocal: dir };
+	};
+
+	// A directory that only exists because a NOTE holds child pages
+	// (`a/b.md` → `a/b/`) is not a vault folder of its own: it has no
+	// Notion page and must never become one. Children there are parented
+	// by the note. Mirrors the applier's `parentChildDir`.
+	const shadowByDir = new Map<string, { id: string; kind: SyncEntry["kind"] }>();
+	for (const [id, e] of Object.entries(state.entries)) {
+		if (e.kind !== "note" && e.kind !== "file") continue;
+		const p = pathOf.get(id)!;
+		shadowByDir.set(childDirOf(p, e.kind), { id, kind: e.kind });
+	}
+	const shadowParentOf = (dir: string): ParentRef | null => {
+		const s = shadowByDir.get(dir);
+		return s ? { id: s.id } : null;
+	};
+	/** Parent ref for a CHILD sitting in `dir`: the note that owns the
+	 * directory when it is a note's child-page dir, else the dir itself. */
+	const parentRefForChild = (dir: string): ParentRef =>
+		shadowParentOf(dir) ?? parentRefFor(dir);
+
+	const total = fileByPath.size;
+	let done = 0;
+	let lastEmit = 0;
+	const tick = (path: string): void => {
+		done++;
+		const n = Date.now();
+		if (done === 1 || done % 50 === 0 || n - lastEmit > 200) {
+			lastEmit = n;
+			onProgress?.(done, total, path);
+		}
+	};
+
+	const local: Record<string, Side> = {};
+	const claimed = new Set<string>();
+	for (const [id, e] of Object.entries(state.entries)) {
+		const p = pathOf.get(id)!;
+		if (e.kind === "folder") {
+			local[id] = folderSet.has(p)
+				? {
+						deleted: false,
+						parent: parentRefFor(parentDir(p)),
+						name: basename(p),
+						sha: null,
+					}
+				: { deleted: true };
+			if (folderSet.has(p)) claimed.add(p);
+			continue;
+		}
+		const f = fileByPath.get(p);
+		if (!f) {
+			local[id] = { deleted: true };
+			continue;
+		}
+		claimed.add(p);
+		const baseSha = e.srcSha ?? e.localHash ?? e.fileSha ?? null;
+		const sha =
+			e.localMtime === f.mtime &&
+			e.localSize === f.size &&
+			baseSha !== null
+				? baseSha
+				: await sha256Hex(
+						new Uint8Array(await vault.readBinary(f.path)),
+					).then((s) => {
+						tick(f.path);
+						return s;
+					});
+		local[id] = {
+			deleted: false,
+			parent: parentRefForChild(parentDir(p)),
+			name: basename(p),
+			sha,
+		};
+	}
+
+	// unclaimed files/folders → LocalAdded
+	const localAdded: LocalAdded[] = [];
+	for (const dir of folderSet) {
+		if (claimed.has(dir) || folderIdByPath.has(dir)) continue;
+		// don't claim if some base folder maps to it
+		if ([...pathOf.values()].includes(dir)) continue;
+		// a note's child-page directory has no page of its own
+		if (shadowByDir.has(dir)) continue;
+		localAdded.push({
+			path: dir,
+			kind: "folder",
+			parent: parentRefForChild(parentDir(dir)),
+			name: basename(dir),
+			sha: null,
+		});
+		claimed.add(dir);
+	}
+	for (const f of fileByPath.values()) {
+		if (claimed.has(f.path)) continue;
+		const dir = parentDir(f.path);
+		localAdded.push({
+			path: f.path,
+			kind: f.path.toLowerCase().endsWith(".md") ? "note" : "file",
+			// a file sitting in a note's child-page directory is parented
+			// by the NOTE page, not by a folder that doesn't exist remotely
+			parent: parentRefForChild(dir),
+			name: basename(f.path),
+			sha: await sha256Hex(
+				new Uint8Array(await vault.readBinary(f.path)),
+			).then((s) => {
+				tick(f.path);
+				return s;
+			}),
+		});
+	}
+
+	// fallback rename detection: deleted base note/file with exactly one
+	// same-kind same-sha added → it's a move, not delete+add
+	const deletedIds = Object.entries(state.entries)
+		.filter(
+			([id, e]) =>
+				e.kind !== "folder" && local[id]?.deleted === true,
+		)
+		.map(([id]) => id);
+	for (const id of deletedIds) {
+		const e = state.entries[id]!;
+		const baseSha = e.srcSha ?? e.localHash ?? e.fileSha;
+		const matches = localAdded.filter(
+			(a) => a.kind === e.kind && a.sha === baseSha,
+		);
+		if (matches.length === 1) {
+			const a = matches[0]!;
+			local[id] = {
+				deleted: false,
+				parent: a.parent,
+				name: a.name,
+				sha: a.sha,
+			};
+			localAdded.splice(localAdded.indexOf(a), 1);
+			claimed.add(a.path);
+			pathOf.set(id, a.path);
+		}
+	}
+
+	return { local, localAdded, pathOf, folderIdByPath, claimed };
+}

@@ -1,0 +1,8 @@
+{
+	"id": "notion-hub-sync",
+	"name": "Notion Hub Sync",
+	"version": "0.2.0",
+	"minAppVersion": "1.4.0",
+	"description": "Sync your whole vault across devices through a Notion page tree.",
+	"isDesktopOnly": false
+}

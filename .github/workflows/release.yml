@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+      - run: npm run build
+
+      # 校验 tag 与 manifest.json / versions.json 一致，避免 BRAT 装到错版本
+      - name: Verify versions match tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          MANIFEST=$(node -p "require('./manifest.json').version")
+          echo "tag=$TAG manifest=$MANIFEST"
+          test "$TAG" = "$MANIFEST"
+          node -p "require('./versions.json')" | grep -q "\"$TAG\"" || {
+            echo "versions.json 缺少 $TAG"; exit 1; }
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            main.js manifest.json styles.css
