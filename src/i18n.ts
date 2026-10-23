@@ -1,3 +1,5 @@
+import { getLanguage, moment } from "obsidian";
+
 export type SupportedLocale = "en" | "zh-CN";
 
 export interface I18nStrings {
@@ -137,6 +139,9 @@ export interface I18nStrings {
 	panelGridStatus: string;
 	panelGridHistory: string;
 	panelGridDeleted: string;
+	settingsLanguage: string;
+	settingsLanguageDescription: string;
+	languageAuto: string;
 	phaseScanLocal: string;
 	phaseScanRemote: string;
 	phasePlan(count: number): string;
@@ -169,6 +174,11 @@ export interface I18nStrings {
 	confirmResetStateText: string;
 	confirmReuploadText: string;
 	logResetState: string;
+	logStateUnreadable(kind: string, bytes: number, detail: string): string;
+	logStateQuarantined(path: string): string;
+	logStateUnreadableAgain: string;
+	confirmQuarantineText: string;
+	confirmQuarantineOk: string;
 	logClearRemote(count: number): string;
 }
 
@@ -327,6 +337,10 @@ const EN_STRINGS: I18nStrings = {
 	panelGridStatus: "Conflicts",
 	panelGridHistory: "History",
 	panelGridDeleted: "Deleted",
+	settingsLanguage: "Language",
+	settingsLanguageDescription:
+		"Interface language. Auto follows Obsidian's own language setting.",
+	languageAuto: "Auto (follow Obsidian)",
 	phaseScanLocal: "Scanning local files…",
 	phaseScanRemote: "Fetching Notion changes…",
 	phasePlan: (count) =>
@@ -388,6 +402,14 @@ const EN_STRINGS: I18nStrings = {
 		"ALL pages under the Notion root page (including version history) will be moved to the Notion trash (recoverable for 30 days), then the whole vault is uploaded again. Other devices must run \"Reset sync record (re-match)\" afterwards — if they show the bulk-delete prompt, they should choose \"Cancel this sync\" first.",
 	logResetState:
 		"Sync record reset — next sync re-matches by path.",
+	logStateUnreadable: (kind, bytes, detail) =>
+		`Sync state unreadable (${kind}, ${bytes} bytes: ${detail}) — this round was skipped instead of re-downloading the whole vault. Run "Reset sync record" to start over.`,
+	logStateQuarantined: (path) => `Unreadable sync state kept as ${path}`,
+	logStateUnreadableAgain:
+		"Sync state is still unreadable — see the log line above for the exact error.",
+	confirmQuarantineText:
+		"The sync record could not be read, which makes every round re-download the whole vault. Rename the damaged file (kept for inspection) and re-match against the existing Notion pages?",
+	confirmQuarantineOk: "Rename and re-match",
 	logClearRemote: (count) =>
 		`Moved ${count} Notion page${count === 1 ? "" : "s"} to trash.`,
 };
@@ -534,6 +556,10 @@ const ZH_CN_STRINGS: I18nStrings = {
 	panelGridStatus: "冲突",
 	panelGridHistory: "历史版本",
 	panelGridDeleted: "已删除",
+	settingsLanguage: "界面语言",
+	settingsLanguageDescription:
+		"插件界面语言。“自动”跟随 Obsidian 自身的语言设置。",
+	languageAuto: "自动（跟随 Obsidian）",
 	phaseScanLocal: "扫描本地文件…",
 	phaseScanRemote: "获取 Notion 端变更…",
 	phasePlan: (count) => `计划执行 ${count} 项操作`,
@@ -593,6 +619,14 @@ const ZH_CN_STRINGS: I18nStrings = {
 	confirmReuploadText:
 		"Notion 根页面下的全部页面（包括版本历史）会被移入 Notion 回收站（30 天内可恢复），然后重新上传整个仓库。其他设备之后需要运行「重置同步记录（重新匹配）」；如果它们弹出批量删除确认，请先选择「取消本次同步」。",
 	logResetState: "同步记录已重置，下次同步按路径重新匹配。",
+	logStateUnreadable: (kind, bytes, detail) =>
+		`同步记录无法读取（${kind}，${bytes} 字节：${detail}）——本轮已跳过，不会重新下载整个库。如需从头开始，请执行「重置同步记录」。`,
+	logStateQuarantined: (path) => `无法读取的同步记录已改名保留为 ${path}`,
+	logStateUnreadableAgain:
+		"同步记录仍然无法读取——具体原因见上一条日志。",
+	confirmQuarantineText:
+		"同步记录文件无法读取，这会让每轮同步都重新下载整个库。是否把损坏的文件改名保留（便于排查），并按 Notion 现有页面重新匹配？",
+	confirmQuarantineOk: "改名保留并重新匹配",
 	logClearRemote: (count) => `已将 ${count} 个 Notion 页面移入回收站`,
 };
 
@@ -604,6 +638,21 @@ export function resolveLocale(language: string | undefined): SupportedLocale {
 }
 
 function detectLanguage(): string | undefined {
+	// Obsidian ≥ 1.8.7 exposes the app language directly. `localStorage
+	// ["language"]` (the old trick) stopped being maintained and is empty
+	// on mobile — that is why the UI fell back to English on iOS.
+	try {
+		const lang = getLanguage();
+		if (lang) return lang;
+	} catch {
+		// API older than 1.8.7: fall through to the next source.
+	}
+	try {
+		const loc = moment?.locale?.();
+		if (loc) return loc;
+	} catch {
+		// moment unavailable in this environment.
+	}
 	try {
 		if (typeof window !== "undefined" && window.localStorage) {
 			return window.localStorage.getItem("language") ?? undefined;
@@ -614,7 +663,18 @@ function detectLanguage(): string | undefined {
 	return undefined;
 }
 
+/** Explicit language choice from settings; null = follow Obsidian. */
+let overriddenLocale: SupportedLocale | null = null;
+
+/** `"auto"` clears the override and resumes detection. */
+export function setOverriddenLocale(value: string | undefined): void {
+	overriddenLocale =
+		value === undefined || value === "" || value === "auto"
+			? null
+			: resolveLocale(value);
+}
+
 export function getStrings(language?: string): I18nStrings {
-	const lang = language ?? detectLanguage();
+	const lang = language ?? overriddenLocale ?? detectLanguage();
 	return resolveLocale(lang) === "zh-CN" ? ZH_CN_STRINGS : EN_STRINGS;
 }

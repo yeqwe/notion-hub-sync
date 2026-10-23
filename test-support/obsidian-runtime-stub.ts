@@ -2,6 +2,24 @@ export class Notice {
 	constructor(_message?: string) {}
 }
 
+/** Obsidian ≥ 1.8.7 exposes the configured app language; tests default
+ * to English and may override via `setStubLanguage`. */
+let stubLanguage = "en";
+
+export function setStubLanguage(language: string): void {
+	stubLanguage = language;
+}
+
+export function getLanguage(): string {
+	return stubLanguage;
+}
+
+export const moment = {
+	locale(): string {
+		return stubLanguage;
+	},
+};
+
 export function requestUrl(): Promise<never> {
 	return Promise.reject(new Error("requestUrl is not implemented in tests"));
 }
@@ -63,6 +81,10 @@ export class Setting {
 	constructor(_containerEl: HTMLElement) {}
 
 	addButton(): this {
+		return this;
+	}
+
+	addDropdown(): this {
 		return this;
 	}
 

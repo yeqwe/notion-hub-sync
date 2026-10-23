@@ -1,5 +1,5 @@
 import { Notice, PluginSettingTab, Setting } from "obsidian";
-import { getStrings } from "../i18n";
+import { getStrings, setOverriddenLocale } from "../i18n";
 import { testConnection } from "../connection";
 import type { SelectiveConfigSettings } from "../config/filter";
 import type NotionHubSyncPlugin from "../main";
@@ -13,6 +13,24 @@ export class NotionHubSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 		const strings = getStrings();
+
+		new Setting(containerEl)
+			.setName(strings.settingsLanguage)
+			.setDesc(strings.settingsLanguageDescription)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("auto", strings.languageAuto)
+					.addOption("zh-CN", "简体中文")
+					.addOption("en", "English")
+					.setValue(this.plugin.settings.language)
+					.onChange(async (value) => {
+						this.plugin.settings.language = value;
+						setOverriddenLocale(value);
+						await this.plugin.saveSettings();
+						// rebuild so every label picks up the new language
+						this.display();
+					}),
+			);
 
 		new Setting(containerEl)
 			.setName(strings.integrationToken)

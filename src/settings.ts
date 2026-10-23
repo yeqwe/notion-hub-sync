@@ -24,6 +24,8 @@ export interface NotionHubSettings {
 	token: string;
 	rootPage: string;
 	deviceId: string;
+	/** "auto" follows Obsidian's language; otherwise "en" / "zh-CN". */
+	language: string;
 	historyEnabled: boolean;
 	historyIntervalMinutes: number;
 	historyMaxVersions: number;
@@ -44,6 +46,7 @@ export const DEFAULT_SETTINGS: NotionHubSettings = {
 	token: "",
 	rootPage: "",
 	deviceId: "",
+	language: "auto",
 	historyEnabled: true,
 	historyIntervalMinutes: 10,
 	historyMaxVersions: 50,
