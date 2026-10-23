@@ -44,12 +44,14 @@ describe("autoSyncIgnoresPath", () => {
 
 function harness(overrides?: Partial<AutoSyncHooks>) {
 	const calls: string[] = [];
+	/** forceAudit flag of each round that actually fired, in order. */
+	const forceAudit: boolean[] = [];
 	const timers = new Map<number, () => void>();
 	let nextTimer = 1;
 	let intervalCb: (() => void) | null = null;
 	const vaultCallbacks = new Map<
 		string,
-		(path: string, old?: string) => void
+		(path: string, old?: string, isFolder?: boolean) => void
 	>();
 	const state = emptyState("r");
 	state.lastSyncAt = 1000;
@@ -59,8 +61,9 @@ function harness(overrides?: Partial<AutoSyncHooks>) {
 		getState: () => state,
 		getVaultIO: () => ({ writes }) as never,
 		configDir: () => ".obsidian",
-		request: async () => {
+		request: async (opts) => {
 			calls.push("request");
+			forceAudit.push(opts?.forceAudit ?? false);
 			return newReport();
 		},
 		setTimeoutFn: (cb) => {
@@ -91,7 +94,16 @@ function harness(overrides?: Partial<AutoSyncHooks>) {
 		for (const cb of [...timers.values()]) cb();
 		timers.clear();
 	};
-	return { calls, timers, fireTimer, vaultCallbacks, state, writes, runInterval: () => intervalCb?.() };
+	return {
+		calls,
+		timers,
+		fireTimer,
+		vaultCallbacks,
+		state,
+		writes,
+		forceAudit,
+		runInterval: () => intervalCb?.(),
+	};
 }
 
 describe("wireAutoSync", () => {
@@ -128,5 +140,42 @@ describe("wireAutoSync", () => {
 		h.state.lastSyncAt = 1_000_000 - 6 * 60_000;
 		h.runInterval();
 		expect(h.calls).toEqual(["request"]);
+	});
+
+	it("a directory event upgrades the round to a full audit", () => {
+		// One rename moves a whole subtree; if the per-file hints do not line
+		// up, an incremental round reads "local subtree gone" and trashes the
+		// remote pages. A directory operation is rare, so paying for a full
+		// enumeration is cheaper than re-creating pages the other device can
+		// never find again.
+		const h = harness();
+		h.vaultCallbacks.get("rename")!("New", "Old", true);
+		h.fireTimer();
+		expect(h.calls).toEqual(["request"]);
+		expect(h.forceAudit).toEqual([true]);
+	});
+
+	it("a deleted directory also upgrades the round", () => {
+		const h = harness();
+		h.vaultCallbacks.get("delete")!("OldDir", undefined, true);
+		h.fireTimer();
+		expect(h.forceAudit).toEqual([true]);
+	});
+
+	it("plain file events stay incremental", () => {
+		const h = harness();
+		h.vaultCallbacks.get("modify")!("a.md", undefined, false);
+		h.vaultCallbacks.get("rename")!("b.md", "a.md", false);
+		h.fireTimer();
+		expect(h.forceAudit).toEqual([false]);
+	});
+
+	it("the force flag is consumed by the round it triggered", () => {
+		const h = harness();
+		h.vaultCallbacks.get("rename")!("New", "Old", true);
+		h.fireTimer();
+		h.vaultCallbacks.get("modify")!("a.md");
+		h.fireTimer();
+		expect(h.forceAudit).toEqual([true, false]);
 	});
 });

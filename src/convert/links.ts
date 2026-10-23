@@ -38,3 +38,29 @@ export function extractPageId(input: string): string | null {
 export function toHex32(pageId: string): string {
 	return pageId.toLowerCase().replace(/-/g, "");
 }
+
+/**
+ * Link targets Notion silently DROPS when they reach it through
+ * `/pages/{id}/markdown`.
+ *
+ * Measured (scripts/probe-badurl2.mjs), not guessed: an `obsidian://`, a
+ * `file://`, or an empty target is stripped to its bare text — the note
+ * still syncs, so nothing looks wrong until the other device opens it and
+ * the link is gone. That is why this is checked before the push and
+ * reported as a warning instead of being left to fail loudly later; there
+ * is nothing loud about it.
+ *
+ * Relative targets and `#anchors` survive untouched (also measured), so
+ * they are NOT reported.
+ */
+export function isDroppedLinkTarget(url: string): boolean {
+	const u = url.trim();
+	if (u === "") return true;
+	// Any scheme other than http(s)/mailto loses its link. Match the scheme
+	// explicitly so a relative path (`notes/a.md`, which survives) is not
+	// mistaken for one.
+	const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(u);
+	if (scheme === null) return false;
+	const s = (scheme[1] as string).toLowerCase();
+	return s !== "http" && s !== "https" && s !== "mailto";
+}

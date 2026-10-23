@@ -33,7 +33,9 @@ export interface AutoSyncHost {
 	): void;
 	onVaultEvent(
 		type: "modify" | "create" | "delete" | "rename",
-		cb: (path: string, oldPath?: string) => void,
+		/** `isFolder` is true for directory-level events: those move a whole
+		 * subtree at once, and a per-file view of them is not trustworthy. */
+		cb: (path: string, oldPath?: string, isFolder?: boolean) => void,
 	): unknown;
 	onLayoutReady(cb: () => void): void;
 }
@@ -44,8 +46,17 @@ export interface AutoSyncHooks {
 	getVaultIO(): VaultIO | null;
 	/** configDir (e.g. ".obsidian") — events inside it are ignored. */
 	configDir(): string;
-	/** run one auto round; resolves with the report. */
-	request(): Promise<SyncReport>;
+	/** run one auto round; resolves with the report.
+	 *
+	 * `forceAudit` asks the engine to re-enumerate the whole remote tree this
+	 * round. It is set after a DIRECTORY-level rename or delete: one such
+	 * event moves an entire subtree, the per-file rename hints that carry
+	 * that across rounds can be lost (event before layout-ready, plugin
+	 * reload, a dropped debounce), and an incremental round against stale
+	 * remote metadata then decides "local subtree gone" and trashes the
+	 * remote pages. A directory operation is rare; a full enumeration is
+	 * cheap next to re-creating pages the other device can never find again. */
+	request(opts?: { forceAudit?: boolean }): Promise<SyncReport>;
 	/** called on every relevant vault change, before the debounce fires:
 	 * lets the host keep the "pending changes" list honest without a second
 	 * event subscription (and without a second debounce timer). */
@@ -99,9 +110,17 @@ export function wireAutoSync(
 		((cb: () => void, ms: number) => window.setInterval(cb, ms));
 	const now = hooks.now ?? (() => Date.now());
 
+	/** Set when a directory-level rename/delete landed inside the current
+	 * debounce window. Consumed by the round it triggers. */
+	let pendingForceAudit = false;
+
 	const fire = () => {
 		if (!autoSyncAllowed(hooks.getSettings(), hooks.getState())) return;
-		void hooks.request().then((r) => hooks.onReport?.(r));
+		const forceAudit = pendingForceAudit;
+		pendingForceAudit = false;
+		void hooks
+			.request(forceAudit ? { forceAudit: true } : undefined)
+			.then((r) => hooks.onReport?.(r));
 	};
 
 	let timer: number | null = null;
@@ -121,16 +140,23 @@ export function wireAutoSync(
 
 	for (const type of ["modify", "create", "delete"] as const) {
 		host.registerEvent(
-			host.onVaultEvent(type, (path) => {
+			host.onVaultEvent(type, (path, _old, isFolder) => {
 				if (!relevant(path) || ours(path)) return;
+				// A deleted directory takes its subtree with it; the per-file
+				// view cannot be reconciled incrementally.
+				if (type === "delete" && isFolder) pendingForceAudit = true;
 				hooks.onChange?.(path);
 				schedule();
 			}),
 		);
 	}
 	host.registerEvent(
-		host.onVaultEvent("rename", (path) => {
+		host.onVaultEvent("rename", (path, oldPath, isFolder) => {
 			if (!relevant(path) || ours(path)) return;
+			// Same reasoning as the delete case: a renamed directory is one
+			// subtree moving, and its rename hint is the only thing that makes
+			// the base paths line up next round.
+			if (isFolder) pendingForceAudit = true;
 			hooks.onChange?.(path);
 			schedule();
 		}),

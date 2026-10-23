@@ -247,12 +247,17 @@ export async function snapshotLocal(
 		};
 	}
 	// unclaimed files/folders → LocalAdded
+	// Every base path, in one set: the folder loop below used to rebuild
+	// `[...pathOf.values()]` and search it once per unclaimed directory,
+	// which is O(folders × entries) — a 2000-file vault spent more time in
+	// that allocation than in hashing.
+	const basePaths = new Set(pathOf.values());
 	const localAdded: LocalAdded[] = [];
 	for (const dir of folderSet) {
 		if (claimed.has(dir) || folderIdByPath.has(dir)) continue;
 		if (clashing.has(dir)) continue;
 		// don't claim if some base folder maps to it
-		if ([...pathOf.values()].includes(dir)) continue;
+		if (basePaths.has(dir)) continue;
 		// a note's child-page directory has no page of its own
 		if (shadowByDir.has(dir)) continue;
 		localAdded.push({

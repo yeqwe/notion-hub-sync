@@ -1,6 +1,6 @@
 import { NotionApiError, type NotionClient } from "../notion/client";
 import { obsidianToNotion } from "../convert/obsidian-to-notion";
-import type { LinkResolver } from "../convert/links";
+import { isDroppedLinkTarget, type LinkResolver } from "../convert/links";
 import {
 	buildSourceToggle,
 	splitPageMarkdown,
@@ -32,6 +32,22 @@ interface PageMdResponse {
 
 function hexOf(url: string): string | null {
 	return url.match(/[0-9a-fA-F]{32}/)?.[0]?.toLowerCase() ?? null;
+}
+
+/** Distinct non-http(s) link targets in `text`, capped so a note with a
+ * thousand `obsidian://` links produces one readable warning. */
+function droppedLinkTargets(text: string): string[] {
+	const out: string[] = [];
+	const seen = new Set<string>();
+	// inline `[text](target)` and images alike; both lose the target.
+	for (const m of text.matchAll(/!?\[[^\]\n]*\]\(([^)\s]*)/g)) {
+		const url = (m[1] as string) ?? "";
+		if (!isDroppedLinkTarget(url) || seen.has(url)) continue;
+		seen.add(url);
+		out.push(url.length > 40 ? `${url.slice(0, 37)}…` : url);
+		if (out.length >= 5) break;
+	}
+	return out;
 }
 
 export function makeLinks(deps: SyncDeps): LinkResolver {
@@ -159,6 +175,22 @@ export async function pushNoteContent(
 		links,
 		sourcePath: file.path,
 	});
+	// Notion silently strips link targets it does not accept (obsidian://,
+	// file://, empty). The push succeeds, so without this the loss is only
+	// discovered on the other device — days later, with no way to tell which
+	// round did it. The source toggle still holds the original bytes, so the
+	// link is recoverable; say so instead of leaving it silent.
+	const dropped = droppedLinkTargets(text);
+	if (dropped.length > 0) {
+		report.warnings.push(
+			`${file.path}: ${dropped.length} link target(s) Notion will not store ` +
+				`(${dropped.slice(0, 3).join(", ")}${dropped.length > 3 ? ", …" : ""}) — ` +
+				`the link text is kept, the target is not`,
+		);
+		deps.debug?.(
+			`push note ${file.path}: dropped link targets ${JSON.stringify(dropped)}`,
+		);
+	}
 	const toggle = buildSourceToggle(srcSha, VIS_PLACEHOLDER, buf);
 	if (toggle === null) {
 		deps.log?.(
