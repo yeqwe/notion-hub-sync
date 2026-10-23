@@ -50,6 +50,9 @@ export interface NotionHubSettings {
 	maxFileSizeMB: number;
 	/** prompt before this many local deletions in one round (0 = off). */
 	deleteGuardThreshold: number;
+	/** Verbose per-item diagnostics to the developer console. Never touches
+	 * the sync panel — that channel is for milestones only. */
+	debugLog: boolean;
 }
 
 export const DEFAULT_SETTINGS: NotionHubSettings = {
@@ -72,6 +75,7 @@ export const DEFAULT_SETTINGS: NotionHubSettings = {
 	syncOnForeground: true,
 	maxFileSizeMB: 200,
 	deleteGuardThreshold: 10,
+	debugLog: false,
 };
 
 /** Merge persisted settings over the defaults, normalizing nested objects

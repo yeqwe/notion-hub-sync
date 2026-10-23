@@ -184,11 +184,22 @@ export async function pruneJournal(
 /** Append one journal entry; splits text into ≤1900-char segments, and
  * spills into extra blocks when ops JSON exceeds ~50 KB. */
 export async function writeJournal(
-	deps: { client: NotionClient; state: SyncState; saveState(): Promise<void> },
+	deps: {
+		client: NotionClient;
+		state: SyncState;
+		saveState(): Promise<void>;
+		/** per-round detail; the caller already logs the milestone itself. */
+		debug?: (msg: string) => void;
+	},
 	ops: JournalOp[],
 ): Promise<void> {
 	if (ops.length === 0) return;
 	const journalId = await ensureJournal(deps);
+	const byType: Record<string, number> = {};
+	for (const op of ops) byType[op.o] = (byType[op.o] ?? 0) + 1;
+	deps.debug?.(
+		`journal: appending ${ops.length} op(s) ${JSON.stringify(byType)} to ${journalId.slice(0, 8)}`,
+	);
 	const json = JSON.stringify({
 		v: 1,
 		t: new Date().toISOString(),

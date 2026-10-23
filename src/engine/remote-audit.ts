@@ -341,6 +341,10 @@ export async function auditSearchScan(
 		);
 	}
 	const byId = new Map(usable.map((i) => [hex(i.id), i] as const));
+	deps.debug?.(
+		`audit: ${infos.length} page(s) scanned, ${infos.length - live.length} trashed, ` +
+			`${infos.length - usable.length} system, ${usable.length} usable`,
+	);
 
 	// ---- in-tree resolution from the scanned parent map ----
 	// The scan already holds every page the connection can see, so each
@@ -499,6 +503,11 @@ export async function auditSearchScan(
 				`(< ${Math.round(AUDIT_MIN_COVERAGE * 100)}%) —tree-walk fallback`,
 		);
 		return null;
+	}
+	if (unseen.length > 0) {
+		deps.debug?.(
+			`audit: confirming ${unseen.length} unseen entry(ies) with direct GET`,
+		);
 	}
 	for (const id of unseen) {
 		const p = await getPage(deps.client, id);

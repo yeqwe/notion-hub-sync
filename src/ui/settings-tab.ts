@@ -272,6 +272,18 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName(strings.settingsDebugLog)
+			.setDesc(strings.settingsDebugLogDescription)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.debugLog)
+					.onChange(async (value) => {
+						this.plugin.settings.debugLog = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName(strings.settingsConfigSync)
 			.setDesc(strings.settingsConfigSyncDescription)
 			.addToggle((toggle) =>

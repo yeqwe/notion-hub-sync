@@ -23,6 +23,7 @@ export type HistoryDeps = Pick<
 	| "historyPageCache"
 	| "now"
 	| "log"
+	| "debug"
 >;
 
 export const HISTORY_CONTAINER_TITLE = "🗄️ 同步历史 (notion-hub-sync)";
@@ -270,6 +271,7 @@ export async function recordVersion(
 	const entry = deps.state.entries[pageId];
 	const sha = await sha256Hex(bytes);
 	if (sha === entry?.lastVersionSha) {
+		deps.debug?.(`history ${path}: unchanged sha, version skipped`);
 		return "skipped";
 	}
 	const now = deps.now?.() ?? Date.now();
@@ -278,6 +280,7 @@ export async function recordVersion(
 		entry?.lastVersionAt !== undefined &&
 		now - entry.lastVersionAt < opts.intervalMinutes * 60_000
 	) {
+		deps.debug?.(`history ${path}: within push interval, version skipped`);
 		return "skipped";
 	}
 
@@ -330,6 +333,9 @@ export async function recordVersion(
 	if (vc > opts.maxVersions || vc % 10 === 0) {
 		await pruneHistory(deps, historyPageId, opts, now);
 	}
+	deps.debug?.(
+		`history ${path}: recorded "${reason}" (${bytes.byteLength} B, ${sha.slice(0, 8)})`,
+	);
 	return "recorded";
 }
 
@@ -393,4 +399,5 @@ async function pruneHistory(
 	for (const id of toDelete.slice(0, MAX_RETENTION_DELETES)) {
 		await deps.client.request("DELETE", `/blocks/${id}`);
 	}
+	deps.debug?.(`history: pruned ${toDelete.length} old version block(s)`);
 }

@@ -36,6 +36,8 @@ export interface ConfigSyncDeps {
 	isMobile: boolean;
 	now: () => number;
 	log?: (msg: string) => void;
+	/** per-file detail (each config file hashed/pushed); absent → silent. */
+	debug?: (msg: string) => void;
 }
 
 export interface ConfigSyncResult {
@@ -218,6 +220,7 @@ export async function syncConfig(
 		state.lastConfigScan !== undefined &&
 		now - state.lastConfigScan < MOBILE_SCAN_MIN_MS
 	) {
+		deps.debug?.("config: mobile throttle, skipped this round");
 		return out;
 	}
 	state.lastConfigScan = now;
@@ -252,6 +255,9 @@ export async function syncConfig(
 		}
 	};
 	await walk("");
+	deps.debug?.(
+		`config: ${Object.keys(local).length} local file(s) in scope`,
+	);
 
 	// ---- remote ----
 	const remote: Record<
@@ -322,6 +328,9 @@ export async function syncConfig(
 				b?.mediaBlockId,
 			);
 			if (!r) continue;
+			deps.debug?.(
+				`config remote ${rel}: ${r.bytes ? "content changed" : "unchanged (block id / caption sha)"}`,
+			);
 			remote[rel] = { sha: r.sha, pageId: id };
 			if (r.bytes) remoteBytes.set(rel, r.bytes);
 			remoteBlock.set(rel, r.mediaBlockId);
@@ -344,6 +353,16 @@ export async function syncConfig(
 
 	// ---- plan + apply ----
 	const actions = planConfig(state.config, local, remote);
+	if (actions.length > 0) {
+		deps.log?.(
+			`config: ${actions.length} action(s) — remote=${Object.keys(remote).length} ` +
+				`base=${Object.keys(state.config).length} audit=${audit}`,
+		);
+	} else {
+		deps.debug?.(
+			`config: nothing to do (remote=${Object.keys(remote).length} base=${Object.keys(state.config).length})`,
+		);
+	}
 	const syncDepsLike: SyncDeps = {
 		vault: null as unknown as SyncDeps["vault"],
 		client: deps.client,
@@ -377,6 +396,7 @@ export async function syncConfig(
 	};
 
 	for (const a of actions) {
+		deps.debug?.(`config action ${a.type} ${a.rel}`);
 		try {
 			switch (a.type) {
 				case "pushCreate": {
@@ -506,6 +526,10 @@ export async function syncConfig(
 			deps.log?.(`config ${a.type} ${a.rel}: ${String(err)}`);
 		}
 	}
+	deps.debug?.(
+		`config done: journalOps=${out.journalOps.length} ` +
+			`conflictCopies=${out.conflictCopies.length} localWritten=${out.localWritten}`,
+	);
 	return out;
 }
 

@@ -415,11 +415,13 @@ export async function applyActions(
 	).length;
 	let done = 0;
 	ctx.lastCheckpoint = ctx.deps.now?.() ?? Date.now();
+	ctx.deps.debug?.(`apply: ${actions.length} action(s), ${total} countable`);
 	const exec = async (action: Action): Promise<void> => {
 		const countable = action.type !== "link" && action.type !== "forget";
 		// resolve before applyOne — trash/move actions mutate entries
 		const path = actionPath(ctx, action);
 		let ok = true;
+		const t0 = Date.now();
 		try {
 			await applyOne(action, ctx);
 		} catch (err) {
@@ -453,6 +455,9 @@ export async function applyActions(
 		}
 		if (countable) {
 			done++;
+			ctx.deps.debug?.(
+				`apply ${done}/${total} ${action.type} ${path} (${Date.now() - t0}ms)`,
+			);
 			ctx.deps.event?.({
 				t: "action",
 				action: action.type,
@@ -481,6 +486,9 @@ export async function applyActions(
 
 	for (const g of [...groups.keys()].sort((a, b) => a - b)) {
 		const bucket = groups.get(g)!;
+		ctx.deps.debug?.(
+			`apply group ${g}: ${bucket.list.length} action(s), ${bucket.pool ? "pooled" : "serial"}`,
+		);
 		if (!bucket.pool) {
 			for (const a of bucket.list) await exec(a);
 			continue;
@@ -612,8 +620,8 @@ async function adoptRemotePage(
 async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 	const { deps, report } = ctx;
 	const state = deps.state;
-	deps.log?.(
-		`action ${action.type} ${"id" in action ? `${action.id} ` : ""}` +
+	deps.debug?.(
+		`apply ${action.type} ${"id" in action ? `${action.id} ` : ""}` +
 			`${"localPath" in action ? action.localPath : ""}` +
 			`${"name" in action ? (action as { name?: string }).name ?? "" : ""}` +
 			` ${state.entries["id" in action ? action.id : ""]?.path ?? ""}`,
@@ -736,6 +744,9 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 		case "pushContent": {
 			if (!(await localShaCurrent(ctx, action.id))) {
 				report.skipped++;
+				deps.debug?.(
+					`pushContent ${state.entries[action.id]?.path ?? action.id}: local changed since snapshot — deferred to next round`,
+				);
 				break;
 			}
 			let sr: SyncReport;
@@ -747,7 +758,9 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 				// deletion and the normal deletion path decides what happens
 				// to the local copy.
 				if (!isAlreadyGone(err)) throw err;
-				deps.log?.(`pushContent ${action.id}: target gone — skipped`);
+				deps.log?.(
+					`pushContent ${state.entries[action.id]?.path ?? action.id}: target gone — skipped`,
+				);
 				report.skipped++;
 				break;
 			}
@@ -880,7 +893,7 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 				// retire the entry instead of failing this action forever.
 				if (!isAlreadyGone(err)) throw err;
 				deps.log?.(
-					`moveRemote ${action.id}: target gone — dropping entry`,
+					`moveRemote ${state.entries[action.id]?.path ?? action.id}: target gone — dropping entry`,
 				);
 				delete state.entries[action.id];
 				await ctx.baseStore.remove(action.id);
@@ -932,7 +945,7 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 				// doomed request on every following round forever.
 				if (!isAlreadyGone(err)) throw err;
 				deps.log?.(
-					`trashRemote ${action.id}: already gone (${err instanceof Error ? err.message : String(err)})`,
+					`trashRemote ${state.entries[action.id]?.path ?? action.id}: already gone (${err instanceof Error ? err.message : String(err)})`,
 				);
 			}
 			delete state.entries[action.id];

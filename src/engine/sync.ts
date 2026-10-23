@@ -56,6 +56,35 @@ export interface EngineDeps extends SyncDeps {
 
 const hex = (id: string): string => id.replace(/-/g, "").toLowerCase();
 
+/** Log a milestone with an elapsed-time stamp. `log` is the bounded channel
+ * (one line per phase); per-item detail goes to `debug`.
+ *
+ * Quiet-when-idle: an unchanged round produces exactly two lines (start and
+ * done). Everything in between is staged and only flushed when the round
+ * actually has something to report — a 5-minute interval that logs ten
+ * "nothing to do" lines per hour is how a log stops being read. */
+function makeTrace(deps: SyncDeps): {
+	log: (msg: string) => void;
+	debug: (msg: string) => void;
+	/** Phase milestone: held until the round is known to be non-empty. */
+	phase: (msg: string) => void;
+	flushPhases: () => void;
+	since: () => string;
+} {
+	const t0 = Date.now();
+	const pending: string[] = [];
+	return {
+		log: (m) => deps.log?.(`[+${Date.now() - t0}ms] ${m}`),
+		debug: (m) => deps.debug?.(`[+${Date.now() - t0}ms] ${m}`),
+		phase: (m) => pending.push(`[+${Date.now() - t0}ms] ${m}`),
+		flushPhases: () => {
+			for (const m of pending) deps.log?.(m);
+			pending.length = 0;
+		},
+		since: () => `${Date.now() - t0}ms`,
+	};
+}
+
 export async function runSync(
 	deps: EngineDeps,
 	opts: { full: boolean },
@@ -63,6 +92,11 @@ export async function runSync(
 	const report = newReport();
 	const state = deps.state;
 	const now = deps.now?.() ?? Date.now();
+	const tr = makeTrace(deps);
+	tr.log(
+		`round start: full=${opts.full} entries=${Object.keys(state.entries).length} ` +
+			`lastFullAudit=${state.lastFullAudit === undefined ? "never" : `${Math.round((now - state.lastFullAudit) / 60_000)}min ago`}`,
+	);
 	// Refuse to plan against an unreadable base. The alternative is a silent
 	// whole-vault re-pull every round; failing loudly once is the cheaper
 	// outcome and the caller can quarantine + retry deliberately.
@@ -71,6 +105,7 @@ export async function runSync(
 		report.failures.push(
 			`sync state unreadable (${deps.stateProblem.kind}: ${deps.stateProblem.detail}, ${deps.stateProblem.bytes} bytes) — refused to re-pull the whole vault; the state file was kept for inspection`,
 		);
+		tr.log(`round aborted: state unreadable (${deps.stateProblem.kind})`);
 		return report;
 	}
 	// snapshots mutate state — snapshot it up front so "cancel" can restore
@@ -116,14 +151,31 @@ export async function runSync(
 		}
 	}
 	deps.event?.({ t: "phase", phase: "scanLocal" });
+	tr.phase(`phase scanLocal: scope=${scope ? "limited" : "all"} skipIds=${skipIds.size}`);
 	const localSnap = await snapshotLocal(
 		deps.vault,
 		state,
 		(d, t, p) =>
 			deps.event?.({ t: "scan", stage: "local", done: d, total: t, label: p }),
 		scope ?? undefined,
+		tr.debug,
 	);
 	report.blocked.push(...localSnap.blocked);
+	const ls = localSnap.stats;
+	if (ls.hashed > 0 || ls.renames > 0 || localSnap.blocked.length > 0) {
+		tr.phase(
+			`phase scanLocal done in ${tr.since()}: ` +
+				`${ls.listedFiles} file(s) listed, ${ls.hashed} hashed, ${ls.reused} sha reused, ` +
+				`${localSnap.localAdded.length} local-only, ${localSnap.blocked.length} blocked`,
+		);
+	} else {
+		tr.debug(
+			`phase scanLocal done in ${tr.since()}: all ${ls.reused} file(s) unchanged (mtime+size)`,
+		);
+	}
+	for (const b of localSnap.blocked) {
+		tr.debug(`local blocked ${b.path}: ${b.reason}${b.detail ? ` (${b.detail})` : ""}`);
+	}
 
 	// 2+3. remote snapshot (journal read inside)
 	const links = makeLinks(deps);
@@ -134,6 +186,9 @@ export async function runSync(
 	// content compare then starts from no base (fetch + link). It is the
 	// mandatory cost of re-matching by path, not an extra audit.
 	const coldStart = Object.keys(state.entries).length === 0;
+	tr.phase(
+		`phase scanRemote: full=${opts.full} forceAudit=${coldStart} roundRobin=${deps.engine.roundRobinPerRound}`,
+	);
 	const remoteSnap = await snapshotRemote(deps, {
 		full: opts.full,
 		forceAudit: coldStart,
@@ -145,6 +200,11 @@ export async function runSync(
 	if (remoteSnap.journalSeen.length > 0 || (state.journalSeen ?? []).length === 0) {
 		state.journalSeen = remoteSnap.journalSeen;
 	}
+	tr.phase(
+		`phase scanRemote done in ${tr.since()}: auditDue=${remoteSnap.auditDue} ` +
+			`evaluated=${Object.keys(remoteSnap.remote).length} remoteAdded=${remoteSnap.remoteAdded.length} ` +
+			`journalCandidates=${remoteSnap.journalCandidateIds.length} fetchedBytes=${remoteSnap.fetchedBytes.size}`,
+	);
 
 	// 4. plan
 	const base: Record<string, BaseNode> = {};
@@ -197,6 +257,16 @@ export async function runSync(
 				: undefined,
 		});
 	let actions = planActions();
+	tr.phase(
+		`phase plan in ${tr.since()}: ${actions.length} action(s)`,
+	);
+	// One debug line per planned action — bounded by the plan size and only
+	// emitted to the debug channel, never to the user-facing log.
+	for (const a of actions) {
+		tr.debug(
+			`plan ${a.type} ${"id" in a ? a.id : ""} ${"localPath" in a ? a.localPath : ""}`,
+		);
+	}
 
 	// 4b. bulk local-delete guard: many remote deletions about to trash
 	// local files → confirm first (keep → re-upload instead).
@@ -225,10 +295,14 @@ export async function runSync(
 			report.warnings.push(
 				`sync cancelled: ${trashIds.length} local deletions not confirmed`,
 			);
+			tr.log(`round cancelled by delete guard (${trashIds.length} deletions)`);
 			return report;
 		}
 		if (choice === "keep") {
 			actions = planActions(new Set(trashIds));
+			tr.log(`delete guard: keep ${trashIds.length} local file(s), re-planning as upload`);
+		} else {
+			tr.log(`delete guard: confirmed deleting ${trashIds.length} local file(s)`);
 		}
 	}
 	deps.event?.({
@@ -270,8 +344,18 @@ export async function runSync(
 	if (pulls) deps.event?.({ t: "phase", phase: "download" });
 	else if (pushes) deps.event?.({ t: "phase", phase: "upload" });
 	else deps.event?.({ t: "phase", phase: "apply" });
+	tr.phase(
+		`phase apply: ${actions.filter((a) => a.type !== "link" && a.type !== "forget").length} countable ` +
+			`of ${actions.length} (${pulls ? "download" : pushes ? "upload" : "apply"})`,
+	);
 	await applyActions(actions, ctx);
-
+	tr.phase(
+		`phase apply done in ${tr.since()}: created=${report.created} updated=${report.updated} ` +
+			`skipped=${report.skipped} failed=${report.failed} blocked=${report.blocked.length} ` +
+			`journalOps=${ctx.journalOps.length}`,
+	);
+	for (const f of report.failures) tr.debug(`failure: ${f}`);
+	for (const w of report.warnings) tr.debug(`warning: ${w}`);
 	// 5b. config-dir sync (after main apply, before journal write)
 	if (
 		deps.configIO &&
@@ -279,6 +363,7 @@ export async function runSync(
 		anyConfigEnabled(deps.configSync)
 	) {
 		deps.event?.({ t: "phase", phase: "config" });
+		tr.phase(`phase config: start`);
 		try {
 			const cfgRes = await syncConfig(
 				{
@@ -291,6 +376,7 @@ export async function runSync(
 					isMobile: deps.isMobile ?? false,
 					now: () => deps.now?.() ?? Date.now(),
 					log: deps.log,
+					debug: deps.debug,
 				},
 				{
 					full: opts.full || remoteSnap.auditDue,
@@ -302,19 +388,29 @@ export async function runSync(
 			ctx.journalOps.push(...cfgRes.journalOps);
 			report.conflictCopies.push(...cfgRes.conflictCopies);
 			if (cfgRes.localWritten) report.configWritten = true;
+			tr.phase(
+				`phase config done in ${tr.since()}: ops=${cfgRes.journalOps.length} ` +
+					`conflicts=${cfgRes.conflictCopies.length} localWritten=${cfgRes.localWritten}`,
+			);
 		} catch (err) {
 			report.warnings.push(`config sync failed: ${String(err)}`);
+			tr.log(`phase config failed: ${String(err)}`);
 		}
 	}
 
 	// 6. journal write when remote changed
 	if (ctx.journalOps.length > 0) {
 		deps.event?.({ t: "phase", phase: "journal" });
+		tr.phase(`phase journal: writing ${ctx.journalOps.length} op(s)`);
 		try {
 			await writeJournal(deps, ctx.journalOps);
+			tr.phase(`phase journal done in ${tr.since()}`);
 		} catch (err) {
 			report.warnings.push(`journal write failed: ${String(err)}`);
+			tr.log(`phase journal failed: ${String(err)}`);
 		}
+	} else {
+		tr.debug("phase journal: nothing to write");
 	}
 
 	// 7. bookkeeping
@@ -332,6 +428,19 @@ export async function runSync(
 		blocked: report.blocked.slice(0, 50),
 	};
 	await deps.saveState();
+	// The round had real work → print the staged phase lines now, before the
+	// summary, so the log reads in execution order.
+	const didWork =
+		report.created + report.updated + report.skipped + report.failed > 0 ||
+		report.warnings.length > 0 ||
+		report.blocked.length > 0;
+	if (didWork) tr.flushPhases();
+	tr.log(
+		`round done in ${tr.since()}: created=${report.created} updated=${report.updated} ` +
+			`skipped=${report.skipped} failed=${report.failed} warnings=${report.warnings.length} ` +
+			`conflicts=${report.conflictCopies.length} blocked=${report.blocked.length}` +
+			(didWork ? "" : " (nothing to do)"),
+	);
 	return report;
 }
 

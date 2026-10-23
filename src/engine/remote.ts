@@ -114,6 +114,16 @@ export async function snapshotRemote(
 	);
 	for (const id of jr.candidateIds) candidates.add(id);
 	if (jr.gap) auditDue = true;
+	// Silence on an idle round: "0 candidates" every 5 minutes is noise. Only
+	// a real payload or a gap (which forces an audit) is worth a line.
+	if (jr.candidateIds.length > 0 || jr.gap) {
+		deps.debug?.(
+			`journal: ${state.journalId ? `${jr.newSeen.length} new block(s)` : "no journal page yet"} ` +
+				`→ ${jr.candidateIds.length} candidate(s)${jr.gap ? ", GAP → full audit" : ""}`,
+		);
+	} else {
+		deps.debug?.("journal: no new blocks from other devices");
+	}
 
 	// ---- search (best-effort human edits) ----
 	// No cursor yet + audit due → the tree walk finds everything anyway;
@@ -174,6 +184,10 @@ export async function snapshotRemote(
 		}
 		state.searchCursor = maxEdited;
 		if (!done) auditDue = true; // exhausted all search pages
+		deps.debug?.(
+			`search: ${candidates.size} candidate(s)` +
+				`${done ? "" : ", still paging → audit due"}`,
+		);
 	} else if (!opts.full && state.searchCursor === undefined) {
 		// skipped first search — start the cursor now so the next round
 		// only searches from here
@@ -195,6 +209,11 @@ export async function snapshotRemote(
 			if (!candidates.has(id)) rrOnly.add(id);
 			candidates.add(id);
 		}
+		// Spot checks are a silent correctness backstop: when the user changed
+		// nothing, the round must not advertise machinery they never asked for.
+		if (rrOnly.size > 0) {
+			deps.debug?.(`round-robin: ${rrOnly.size} spot-check(s)`);
+		}
 	}
 
 	// ---- full audit (structure) ----
@@ -209,6 +228,9 @@ export async function snapshotRemote(
 	/** note/file pages that grew child pages — surfaced as a round warning. */
 	let nestedUnderPage: Array<{ title: string; count: number }> | undefined;
 	if (auditDue) {
+		deps.debug?.(
+			`audit: due (${opts.full ? "full sync" : opts.forceAudit ? "cold start" : "interval elapsed"})`,
+		);
 		let scanned: SearchAudit | null = null;
 		try {
 			scanned = await auditSearchScan(deps, {
@@ -228,7 +250,7 @@ export async function snapshotRemote(
 			seenIds = scanned.seenIds;
 			auditPages = scanned.pages;
 			nestedUnderPage = childPagesUnderNotes(state, scanned.pages);
-			deps.log?.(
+			deps.debug?.(
 				`audit: search ${seenIds.size} in-tree, ${scanned.adds.length} new`,
 			);
 		} else {
@@ -255,7 +277,9 @@ export async function snapshotRemote(
 				label: "done",
 			});
 			seenIds = new Set(nodes.map((n) => n.pageId));
-			deps.log?.(`audit: ${nodes.length} nodes: ${nodes.map((n) => `${n.title}(${n.kind})`).join(", ")}`);
+			deps.debug?.(
+				`audit: walked ${nodes.length} node(s) → ${auditAdds.length} new`,
+			);
 			for (const n of nodes) {
 				const entry = state.entries[n.pageId];
 				if (!entry) {
@@ -293,6 +317,11 @@ export async function snapshotRemote(
 		// during eval/apply doesn't re-walk the whole tree next round.
 		state.lastFullAudit = opts.now;
 		await deps.saveState();
+		deps.debug?.(
+			`audit done: ${seenIds.size} in-tree, ${auditAdds.length} new page(s) to evaluate`,
+		);
+	} else {
+		deps.debug?.("audit: not due this round");
 	}
 
 	// ---- evaluate candidates (parallel, pool of 3) ----
@@ -463,6 +492,12 @@ export async function snapshotRemote(
 	if (outside.size > 0) {
 		state.outsideTree = [...outside].slice(-2000);
 	}
+
+	deps.debug?.(
+		`evaluate: ${Object.keys(remote).length} side(s) known ` +
+			`(${Object.values(remote).filter((s) => s.deleted).length} deleted), ` +
+			`${remoteAdded.length} new remote item(s), ${fetchedBytes.size} content(s) cached`,
+	);
 
 	return {
 		remote,

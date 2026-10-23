@@ -388,10 +388,23 @@ export default class NotionHubSyncPlugin extends Plugin {
 				scope: this.settings.scope,
 			},
 			confirmLocalDeletes: (paths) => this.guardLocalDeletes(paths),
+			// Two channels, on purpose:
+			//   log   → milestones. One line per phase, bounded per round, so a
+			//           user can actually read the panel after a 2000-file sync.
+			//   debug → per-item detail (every hash, every action). Console
+			//           only, and only when the user turned it on — putting it
+			//           in the panel would bury the milestones it explains.
 			log: (m) => {
 				console.warn(`[notion-hub-sync] ${m}`);
-				if (/warning|fail|error/i.test(m)) this.syncLog.warn(m);
+				if (/warning|fail|error|blocked|cancelled/i.test(m)) {
+					this.syncLog.warn(m);
+				} else {
+					this.syncLog.info(m);
+				}
 			},
+			debug: this.settings.debugLog
+				? (m) => console.debug(`[notion-hub-sync:debug] ${m}`)
+				: undefined,
 			progress: (done, total) => {
 				this.statusEl?.setText(
 					`NHS ${getStrings().syncProgress(done, total)}`,

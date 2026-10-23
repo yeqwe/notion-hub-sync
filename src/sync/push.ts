@@ -150,9 +150,10 @@ export async function pushNoteContent(
 	const srcSha = await sha256Hex(buf);
 	if (entry?.localHash === srcSha && entry.srcSha === srcSha) {
 		report.skipped++;
+		deps.debug?.(`push note ${file.path}: unchanged, skipped`);
 		return;
 	}
-	deps.log?.(`push note ${file.path}`);
+	deps.debug?.(`push note ${file.path} (${srcSha.slice(0, 8)})`);
 	const text = new TextDecoder().decode(buf);
 	const visible = obsidianToNotion(text, {
 		links,
@@ -294,14 +295,20 @@ export async function pushFileContent(
 			reason: "oversized",
 			detail: `${formatMb(buf.byteLength)} > ${formatMb(limit)}`,
 		});
+		deps.log?.(
+			`blocked: ${file.path} is ${formatMb(buf.byteLength)} (limit ${formatMb(limit)})`,
+		);
 		return;
 	}
 	const fileSha = await sha256Hex(buf);
 	if (entry?.fileSha === fileSha) {
 		report.skipped++;
+		deps.debug?.(`push file ${file.path}: unchanged, skipped`);
 		return;
 	}
-	deps.log?.(`push file ${file.path}`);
+	deps.debug?.(
+		`push file ${file.path} (${formatMb(buf.byteLength)}, ${fileSha.slice(0, 8)})`,
+	);
 	const name = basename(file.path);
 	const plan = planUpload(name);
 
@@ -386,6 +393,9 @@ export async function pushVault(deps: SyncDeps): Promise<SyncReport> {
 	for (const f of folders) {
 		if (isSyncablePath(f) && f !== "") folderSet.add(f);
 	}
+	deps.log?.(
+		`push: ${syncable.length} file(s) in ${folderSet.size} folder(s)`,
+	);
 
 	// phase 0: folders top-down
 	const sortedFolders = [...folderSet].sort(
@@ -475,5 +485,9 @@ export async function pushVault(deps: SyncDeps): Promise<SyncReport> {
 		}
 	}
 	await deps.saveState();
+	deps.log?.(
+		`push done: created=${report.created} updated=${report.updated} ` +
+			`skipped=${report.skipped} failed=${report.failed} blocked=${report.blocked.length}`,
+	);
 	return report;
 }

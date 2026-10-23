@@ -157,6 +157,8 @@ export interface I18nStrings {
 	scanEvaluating(done: number, total: number): string;
 	settingsDeleteGuard: string;
 	settingsDeleteGuardDescription: string;
+	settingsDebugLog: string;
+	settingsDebugLogDescription: string;
 	deleteGuardTitle: string;
 	deleteGuardText(count: number): string;
 	deleteGuardMore(count: number): string;
@@ -432,6 +434,9 @@ const EN_STRINGS: I18nStrings = {
 	settingsDeleteGuard: "Bulk delete guard threshold",
 	settingsDeleteGuardDescription:
 		"Ask for confirmation before a sync round deletes at least this many local files (0 = off).",
+	settingsDebugLog: "Verbose debug log (developer console)",
+	settingsDebugLogDescription:
+		"Print per-file detail (every hash, every action) to the developer console. The sync panel keeps showing round milestones only.",
 	deleteGuardTitle: "Confirm local file deletion",
 	deleteGuardText: (count) =>
 		`Notion deleted the following ${count} file${count === 1 ? "" : "s"}. Syncing will move them to the local trash too.`,
@@ -751,6 +756,9 @@ const ZH_CN_STRINGS: I18nStrings = {
 	settingsDeleteGuard: "批量删除保护阈值",
 	settingsDeleteGuardDescription:
 		"一轮同步要删除的本地文件数达到此值时先弹窗确认（0 = 关闭）",
+	settingsDebugLog: "详细调试日志（开发者控制台）",
+	settingsDebugLogDescription:
+		"把逐文件细节（每次哈希、每个动作）打印到开发者控制台。同步面板仍然只显示每轮的关键节点。",
 	deleteGuardTitle: "确认删除本地文件",
 	deleteGuardText: (count) =>
 		`Notion 端删除了以下 ${count} 个文件。同步会把它们在本地也移到回收站。`,

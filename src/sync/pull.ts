@@ -235,6 +235,14 @@ export interface FetchedNote {
 	decision: ReturnType<typeof decidePullContent>;
 }
 
+/** Which branch a pull took — the only thing that explains a surprise
+ * "this note looks different after syncing" report. */
+function decisionKind(f: FetchedNote): string {
+	return f.decision.kind === "source"
+		? "lossless source"
+		: "visible render";
+}
+
 /** Ceiling for one downloaded note's raw markdown. Not a Notion limit — a
  * "this is not what you think it is" guard: a page whose markdown endpoint
  * returns hundreds of megabytes is a runaway render (nested embeds, an
@@ -371,6 +379,9 @@ async function pullNote(
 	const fetched = await fetchNoteContent(deps, node.pageId, links);
 	const { bytes, split, visSha } = fetched;
 	const entry = deps.state.entries[node.pageId];
+	deps.debug?.(
+		`pull note ${node.path}: ${bytes.byteLength} B from ${decisionKind(fetched)}`,
+	);
 	await preserveOverwritten(deps, node, bytes, report);
 	const path = await writeWithConflict(
 		deps,
@@ -403,6 +414,7 @@ async function pullFile(
 ): Promise<void> {
 	const fetched = await fetchFileContent(deps, node.pageId);
 	const data = fetched.bytes;
+	deps.debug?.(`pull file ${node.path}: ${data.byteLength} B`);
 	const entry = deps.state.entries[node.pageId];
 	await preserveOverwritten(deps, node, data, report);
 	const path = await writeWithConflict(
@@ -446,6 +458,12 @@ export async function pullVault(deps: SyncDeps): Promise<SyncReport> {
 	const nodes: Node[] = [];
 	await walkTree(deps, deps.state.rootPageId, null, nodes);
 	assignPaths(nodes);
+	deps.log?.(
+		`pull: walked ${nodes.length} page(s) ` +
+			`(${nodes.filter((n) => n.kind === "folder").length} folder, ` +
+			`${nodes.filter((n) => n.kind === "note").length} note, ` +
+			`${nodes.filter((n) => n.kind === "file").length} file)`,
+	);
 
 	const links: LinkResolver = {
 		pageIdForTarget: () => null, // pull never needs target→pageId
@@ -493,5 +511,9 @@ export async function pullVault(deps: SyncDeps): Promise<SyncReport> {
 		}
 	}
 	await deps.saveState();
+	deps.log?.(
+		`pull done: updated=${report.updated} failed=${report.failed} ` +
+			`warnings=${report.warnings.length}`,
+	);
 	return report;
 }

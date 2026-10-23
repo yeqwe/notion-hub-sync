@@ -28,6 +28,18 @@ export interface LocalSnapshot {
 	claimed: Set<string>;
 	/** paths blocked this round (unreadable, case clash, out of scope). */
 	blocked: BlockedPath[];
+	/** What the scan actually did — the caller decides whether a milestone
+	 * line is worth printing (an idle round should stay quiet). */
+	stats: {
+		listedFiles: number;
+		listedFolders: number;
+		/** sha reused because mtime+size matched the base. */
+		reused: number;
+		/** files actually read and hashed. */
+		hashed: number;
+		/** deleted+added pairs recognised as a move. */
+		renames: number;
+	};
 }
 
 /**
@@ -87,6 +99,8 @@ export async function snapshotLocal(
 	onProgress?: (done: number, total: number, path: string) => void,
 	/** paths this device syncs at all; absent → everything. */
 	scope?: Scope,
+	/** per-item detail (which files were hashed); absent → silent. */
+	debug?: (msg: string) => void,
 ): Promise<LocalSnapshot> {
 	const hints = state.renameHints ?? [];
 	const raw = await vault.list();
@@ -122,6 +136,13 @@ export async function snapshotLocal(
 		});
 	}
 	const clashing = new Set(caseConflicts.keys());
+	if (clashing.size > 0) {
+		debug?.(`local: ${clashing.size} path(s) blocked by case conflict`);
+	}
+	debug?.(
+		`local: ${fileByPath.size} file(s), ${folderSet.size} folder(s) listed ` +
+			`(rename hints=${hints.length})`,
+	);
 
 	// current local path for every base id (rename hints applied)
 	const pathOf = new Map<string, string>();
@@ -171,6 +192,8 @@ export async function snapshotLocal(
 
 	const local: Record<string, Side> = {};
 	const claimed = new Set<string>();
+	let reused = 0;
+	let hashed = 0;
 	for (const [id, e] of Object.entries(state.entries)) {
 		const p = pathOf.get(id)!;
 		// Out of scope / case-clashing: do NOT evaluate. An absent evaluation
@@ -198,17 +221,24 @@ export async function snapshotLocal(
 		}
 		claimed.add(p);
 		const baseSha = e.srcSha ?? e.localHash ?? e.fileSha ?? null;
-		const sha =
+		const reuse =
 			e.localMtime === f.mtime &&
 			e.localSize === f.size &&
-			baseSha !== null
-				? baseSha
-				: await sha256Hex(
-						new Uint8Array(await vault.readBinary(f.path)),
-					).then((s) => {
-						tick(f.path);
-						return s;
-					});
+			baseSha !== null;
+		if (reuse) {
+			reused++;
+		} else {
+			hashed++;
+			debug?.(`hash ${p} (mtime/size changed or no base sha)`);
+		}
+		const sha = reuse
+			? baseSha
+			: await sha256Hex(
+					new Uint8Array(await vault.readBinary(f.path)),
+				).then((s) => {
+					tick(f.path);
+					return s;
+				});
 		local[id] = {
 			deleted: false,
 			parent: parentRefForChild(parentDir(p)),
@@ -256,6 +286,7 @@ export async function snapshotLocal(
 
 	// fallback rename detection: deleted base note/file with exactly one
 	// same-kind same-sha added → it's a move, not delete+add
+	let renameDetected = 0;
 	const deletedIds = Object.entries(state.entries)
 		.filter(
 			([id, e]) =>
@@ -279,8 +310,29 @@ export async function snapshotLocal(
 			localAdded.splice(localAdded.indexOf(a), 1);
 			claimed.add(a.path);
 			pathOf.set(id, a.path);
+			renameDetected++;
+			debug?.(`rename detected by sha: ${e.path} -> ${a.path}`);
 		}
 	}
 
-	return { local, localAdded, pathOf, folderIdByPath, claimed, blocked };
+	debug?.(
+		`local snapshot: ${reused} sha reused (mtime+size match), ${hashed} hashed, ` +
+			`${renameDetected} rename(s) detected, ${localAdded.length} local-only item(s)`,
+	);
+
+	return {
+		local,
+		localAdded,
+		pathOf,
+		folderIdByPath,
+		claimed,
+		blocked,
+		stats: {
+			listedFiles: fileByPath.size,
+			listedFolders: folderSet.size,
+			reused,
+			hashed,
+			renames: renameDetected,
+		},
+	};
 }

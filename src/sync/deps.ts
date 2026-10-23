@@ -85,7 +85,14 @@ export interface SyncDeps {
 	/** pageId (hex32 title) → history page id; cached once per run. */
 	historyPageCache?: Map<string, string>;
 	now?: () => number;
+	/** Milestone diagnostics: one line per phase / per round, plus every
+	 * decision a maintainer needs to reconstruct what a round did (journal
+	 * read, audit outcome, plan summary, adopt/skip decisions). Bounded per
+	 * round — never one line per file. */
 	log?: (msg: string) => void;
+	/** Per-item detail (each file hashed, each action applied). Off by
+	 * default: a 2000-file vault would bury the milestones above. */
+	debug?: (msg: string) => void;
 	progress?: (done: number, total: number, label: string) => void;
 	event?: (ev: SyncEvent) => void;
 	/** Which paths this device syncs. Set once per round by `runSync`; the
