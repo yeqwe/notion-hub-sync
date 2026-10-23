@@ -20,8 +20,9 @@ jobs:
           cache: npm
 
       # 不用 npm ci：lock 在 Windows 生成，未包含 @rolldown/binding-* 各平台可选
-      # 依赖，CI 上 vitest 会报 "Cannot find native binding"。重新解析最省事。
-      - run: rm -f package-lock.json && npm install --no-audit --no-fund
+      # 依赖，CI 上 vitest 会报 "Cannot find native binding"。
+      # --legacy-peer-deps 绕开 npm arborist 的 edgesOut 崩溃。
+      - run: rm -f package-lock.json && npm install --no-audit --no-fund --legacy-peer-deps
 
       - run: npm test
 
