@@ -58,7 +58,10 @@ export interface PlanInput {
 }
 
 export type Action =
-	| { type: "link"; id: string; localPath: string }
+	/** `kind` is the LOCAL shape of the path (a directory is a folder no
+	 * matter what the page's icon says) — `link` records the entry from it
+	 * instead of trusting the remote classification. */
+	| { type: "link"; id: string; localPath: string; kind?: Kind }
 	| { type: "createRemoteFolder"; localPath: string; parent: ParentRef }
 	| { type: "createLocalFolder"; id: string; parent: ParentRef; name: string }
 	| { type: "pushNew"; localPath: string; kind: Kind; parent: ParentRef }

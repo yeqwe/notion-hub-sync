@@ -374,11 +374,12 @@ function actionGroup(
 		case "merge":
 			return { g: 4, pool: true };
 		case "trashRemote":
-			// Pooled: a bulk remote deletion is one serial action per file
-			// otherwise (pre-delete version upload + trash, ~4 requests per
-			// file at ~3 req/s). Each of these touches its own id/path only,
-			// so the semaphore is a safe bound. Trashing a page is per-page
-			// and order-independent, so plan order does not matter here.
+			// Pooled *within one depth level* — see the depth batching in
+			// applyActions. Trashing a page archives its whole subtree, so a
+			// child request queued in the same batch gets 400 "archived
+			// ancestor" and its base entry can never be dropped: the failure
+			// repeats on every following round. Depth batching keeps the
+			// overlap while preserving children-first.
 			return { g: 5, pool: true };
 		case "trashLocal":
 			// Files are pooled. A DIRECTORY must wait until its children are
@@ -386,10 +387,10 @@ function actionGroup(
 			// serially afterwards — plan order is depth-descending, so every
 			// child (pooled file or inner folder) finishes before its folder.
 			return ctx.deps.state.entries[a.id]?.kind === "folder"
-				? { g: 6, pool: false }
-				: { g: 5, pool: true };
+				? { g: 7, pool: false }
+				: { g: 6, pool: true };
 		default:
-			return { g: 7, pool: false }; // forget
+			return { g: 8, pool: false }; // forget
 	}
 }
 
@@ -469,30 +470,87 @@ export async function applyActions(
 			for (const a of bucket.list) await exec(a);
 			continue;
 		}
-		const tasks = bucket.list.map((a) => {
-			const keys = actionKeys(ctx, a);
-			const prev = Promise.allSettled(
-				keys
-					.map((k) => keyChain.get(k))
-					.filter((p): p is Promise<unknown> => p !== undefined),
-			);
-			const task = prev
-				.then(() => sem.acquire())
-				.then(() => exec(a))
-				.finally(() => sem.release());
-			for (const k of keys) {
-				keyChain.set(
-					k,
-					task.then(
-						() => undefined,
-						() => undefined,
-					),
+		// Remote trashes are depth-batched: trashing a page archives its
+		// whole subtree, so a child still queued in the same batch gets 400
+		// "archived ancestor" and its base entry can never be dropped — the
+		// failure repeats every round. Within one depth the actions touch
+		// disjoint pages (a parent and a child never share a depth), so the
+		// pool still overlaps them; the levels themselves run in sequence,
+		// deepest first, matching the plan's ordering.
+		const batches = g === 5 ? depthBatches(ctx, bucket.list) : [bucket.list];
+		for (const list of batches) {
+			const tasks = list.map((a) => {
+				const keys = actionKeys(ctx, a);
+				const prev = Promise.allSettled(
+					keys
+						.map((k) => keyChain.get(k))
+						.filter((p): p is Promise<unknown> => p !== undefined),
 				);
-			}
-			return task;
-		});
-		await Promise.all(tasks);
+				const task = prev
+					.then(() => sem.acquire())
+					.then(() => exec(a))
+					.finally(() => sem.release());
+				for (const k of keys) {
+					keyChain.set(
+						k,
+						task.then(
+							() => undefined,
+							() => undefined,
+						),
+					);
+				}
+				return task;
+			});
+			await Promise.all(tasks);
+		}
 	}
+}
+
+/** Depth of an action's target in the sync tree — parents first, deeper
+ * entries have a longer parent chain. Used only to order remote trashes. */
+function depthOfAction(ctx: ApplyCtx, action: Action): number {
+	if (!("id" in action)) return 0;
+	const state = ctx.deps.state;
+	let depth = 0;
+	let cur = state.entries[action.id]?.parentId;
+	const seen = new Set<string>();
+	while (cur && cur !== state.rootPageId && !seen.has(cur)) {
+		seen.add(cur);
+		depth++;
+		cur = state.entries[cur]?.parentId;
+	}
+	return depth;
+}
+
+/** Group remote trashes into depth levels, deepest first. Trashing a page
+ * archives its whole subtree, so a child in an earlier batch gets 400
+ * "archived ancestor" and its base entry can never be dropped — the
+ * failure would repeat on every following round. Within one level the
+ * pages are unrelated (a parent and a child never share a depth), so the
+ * pool may still run them concurrently. */
+function depthBatches(ctx: ApplyCtx, list: Action[]): Action[][] {
+	const scored = list.map((a) => ({ a, d: depthOfAction(ctx, a) }));
+	scored.sort((x, y) => y.d - x.d);
+	const out: Action[][] = [];
+	let level: number | null = null;
+	for (const { a, d } of scored) {
+		if (level !== d) {
+			out.push([]);
+			level = d;
+		}
+		out[out.length - 1]!.push(a);
+	}
+	return out;
+}
+
+/** The page is already archived, or was swallowed by a trashed ancestor.
+ * Both mean "it is not there any more" — the goal of a trash — so the
+ * caller can drop its base entry instead of retrying. */
+function isAlreadyGone(err: unknown): boolean {
+	const status = (err as { status?: number }).status;
+	const message = err instanceof Error ? err.message : String(err);
+	if (status === 404) return true;
+	return /archived|in_trash|not found/i.test(message);
 }
 
 async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
@@ -509,16 +567,25 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 			const added = ctx.remoteSnap.remoteAdded.find(
 				(a) => a.id === action.id,
 			);
+			// The LOCAL shape wins: this action only exists because both
+			// sides produced the same path, and a directory path (`a/b`) can
+			// never hold a note. Taking the remote guess instead left a
+			// `note` entry pointing at a directory.
+			const kind = action.kind ?? added?.kind ?? "note";
 			const e = state.entries[action.id] ?? {
 				path: action.localPath,
-				kind: added?.kind ?? "note",
-				notionTitle: titleFor(
-					action.localPath,
-					added?.kind ?? "note",
-				),
-				parentId: "",
+				kind,
+				notionTitle: titleFor(action.localPath, kind),
+				// resolve the real parent now: leaving it empty made the next
+				// round see a bogus move and re-issue moveRemote for an item
+				// that never moved
+				parentId: added
+					? await parentIdOf(ctx, added.parent)
+					: "",
 			};
+			e.kind = kind;
 			e.path = action.localPath;
+			e.notionTitle = titleFor(action.localPath, kind);
 			e.srcSha = e.srcSha ?? added?.sha ?? undefined;
 			e.localHash = e.srcSha;
 			e.remoteEdited =
@@ -612,7 +679,19 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 				report.skipped++;
 				break;
 			}
-			const sr = await writeRemoteContent(ctx, action.id);
+			let sr: SyncReport;
+			try {
+				sr = await writeRemoteContent(ctx, action.id);
+			} catch (err) {
+				// The page (or an ancestor) is already archived. The content
+				// has nowhere to go; the next round's snapshot sees the
+				// deletion and the normal deletion path decides what happens
+				// to the local copy.
+				if (!isAlreadyGone(err)) throw err;
+				deps.log?.(`pushContent ${action.id}: target gone — skipped`);
+				report.skipped++;
+				break;
+			}
 			if (sr.skipped > 0) {
 				report.skipped++;
 				break;
@@ -721,19 +800,32 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 			const e = entryOf(ctx, action.id)!;
 			const parentId = await parentIdOf(ctx, action.parent);
 			const title = titleFor(localPathOf(ctx, action.id), e.kind);
-			if (parentId !== e.parentId) {
-				await deps.client.request(
-					"POST",
-					`/pages/${action.id}/move`,
-					{ parent: { type: "page_id", page_id: parentId } },
+			try {
+				if (parentId !== e.parentId) {
+					await deps.client.request(
+						"POST",
+						`/pages/${action.id}/move`,
+						{ parent: { type: "page_id", page_id: parentId } },
+					);
+				}
+				if (title !== e.notionTitle) {
+					await deps.client.request("PATCH", `/pages/${action.id}`, {
+						properties: {
+							title: { title: [{ text: { content: title } }] },
+						},
+					});
+				}
+			} catch (err) {
+				// The page (or an ancestor) is already archived — another
+				// device, or a trash in an earlier round. Nothing to move, so
+				// retire the entry instead of failing this action forever.
+				if (!isAlreadyGone(err)) throw err;
+				deps.log?.(
+					`moveRemote ${action.id}: target gone — dropping entry`,
 				);
-			}
-			if (title !== e.notionTitle) {
-				await deps.client.request("PATCH", `/pages/${action.id}`, {
-					properties: {
-						title: { title: [{ text: { content: title } }] },
-					},
-				});
+				delete state.entries[action.id];
+				await ctx.baseStore.remove(action.id);
+				break;
 			}
 			remapPaths(state, e.path, localPathOf(ctx, action.id));
 			e.parentId = parentId;
@@ -769,9 +861,21 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 					(msg) => report.warnings.push(msg),
 				);
 			}
-			await deps.client.request("PATCH", `/pages/${action.id}`, {
-				in_trash: true,
-			});
+			try {
+				await deps.client.request("PATCH", `/pages/${action.id}`, {
+					in_trash: true,
+				});
+			} catch (err) {
+				// Another device (or an earlier round of this one) already
+				// archived the page — including the case where it sat under a
+				// parent that was just trashed. The outcome we wanted is
+				// already true, so drop the base entry instead of retrying a
+				// doomed request on every following round forever.
+				if (!isAlreadyGone(err)) throw err;
+				deps.log?.(
+					`trashRemote ${action.id}: already gone (${err instanceof Error ? err.message : String(err)})`,
+				);
+			}
 			delete state.entries[action.id];
 			await ctx.baseStore.remove(action.id);
 			ctx.journalOps.push({ o: "t", id: action.id });

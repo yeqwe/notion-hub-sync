@@ -20,6 +20,50 @@ function sameParent(a: ParentRef, b: ParentRef): boolean {
 	return parentKey(a) === parentKey(b);
 }
 
+/** Two entries claiming ONE place. Only reachable when two devices each
+ * created a page for the same new item — a folder carries no content, so
+ * nothing else can tell them apart. The extra one is a duplicate by
+ * definition: leaving it alive makes every later action fire twice (two
+ * PATCHes for one rename, a trash that fails on the archived ancestor of
+ * its twin, a content push onto the wrong page).
+ *
+ * `moving` ids are skipped — their location is still changing this round,
+ * so "same place" is not yet decided. */
+function duplicateAt(
+	base: Record<string, BaseNode>,
+	local: Record<string, Side>,
+	remote: Record<string, Side>,
+	trashes: Array<{ action: Action; depth: number }>,
+	depthOf: (id: string) => number,
+	moving: ReadonlySet<string>,
+): void {
+	const groups = new Map<string, string[]>();
+	for (const [id, b] of Object.entries(base)) {
+		const le = local[id];
+		if (!le || le.deleted || moving.has(id)) continue;
+		const key = `${b.kind}\u0000${parentKey(le.parent)}\u0000${le.name}`;
+		const ids = groups.get(key);
+		if (ids) ids.push(id);
+		else groups.set(key, [id]);
+	}
+	for (const ids of groups.values()) {
+		if (ids.length < 2) continue;
+		// Every device must keep the SAME one, or two of them each trash
+		// the other's pick and the place ends up with no page at all. The
+		// lowest page id wins: ids are hex32, so the order is the same
+		// everywhere.
+		const keep = [...ids].sort()[0]!;
+		for (const id of ids) {
+			if (id === keep) continue;
+			if (remote[id]?.deleted === true) continue;
+			trashes.push({
+				action: { type: "trashRemote", id },
+				depth: depthOf(id),
+			});
+		}
+	}
+}
+
 interface Eval {
 	changed: boolean; // content changed vs base
 	moved: boolean; // location changed vs base
@@ -121,6 +165,24 @@ export function plan(input: PlanInput): Action[] {
 	const addedActions: Action[] = [];
 	// matched remoteAdded pages with no content → push local onto them
 	const earlyContents: Action[] = [];
+
+	// Every place a base entry speaks for, and which entry that is. A
+	// remote-added page landing on one of them is not a new item, it is the
+	// SAME place seen twice — either two devices each created a page for one
+	// new folder (a folder has no content, so no sha can tell them apart) or
+	// an old duplicate page is still around.
+	//
+	// Entries deleted LOCALLY still count: their place is what the user just
+	// removed, so pulling a page back onto it would resurrect the folder.
+	const takenByBase = new Map<string, string>();
+	for (const [id, b] of Object.entries(base)) {
+		const le = local[id];
+		if (le === undefined) continue; // not evaluated this round
+		const key = le.deleted
+			? `${parentKey({ id: b.parentId })}\u0000${b.name}`
+			: `${parentKey(le.parent)}\u0000${le.name}`;
+		takenByBase.set(key, id);
+	}
 	for (const l of localAdded) {
 		const remote = remoteByPath.get(l.path) ?? null;
 		if (remote) {
@@ -130,6 +192,7 @@ export function plan(input: PlanInput): Action[] {
 					type: "link",
 					id: remote.id,
 					localPath: l.path,
+					kind: l.kind,
 				});
 			} else if (remote.sha === null) {
 				// remote page exists but has no content (e.g. a push died
@@ -138,6 +201,7 @@ export function plan(input: PlanInput): Action[] {
 					type: "link",
 					id: remote.id,
 					localPath: l.path,
+					kind: l.kind,
 				});
 				earlyContents.push({ type: "pushContent", id: remote.id });
 			} else {
@@ -173,8 +237,45 @@ export function plan(input: PlanInput): Action[] {
 			});
 		}
 	}
+	// A remote-added page on a place a base entry already speaks for is the
+	// same thing seen twice, not a new item. Two cases:
+	//
+	//  • the base entry is still there → two devices each created a page for
+	//    one new folder (a folder has no content, so no sha tells them
+	//    apart). The lowest page id wins: hex32 compares identically
+	//    everywhere and both devices can see both ids, so they agree.
+	//  • the base entry was deleted LOCALLY → the user removed this place.
+	//    The base entry is being trashed remotely this round; any page still
+	//    found here is a leftover duplicate. Pulling it back would resurrect
+	//    the folder the user just deleted — the "it keeps coming back" bug.
+	//
+	// Neither case may fall through to createLocalFolder/pullNew.
+	const duplicatePages: string[] = [];
 	for (const r of remoteAdded) {
 		if (matchedRemote.has(r.id)) continue;
+		const key = `${parentKey(r.parent)}\u0000${r.name}`;
+		const baseId = takenByBase.get(key);
+		if (baseId !== undefined) {
+			const le = local[baseId]!;
+			if (le.deleted) {
+				duplicatePages.push(r.id);
+			} else if (baseId < r.id) {
+				// keep the entry this device already has
+				duplicatePages.push(r.id);
+			} else {
+				// the remote page wins: bind the local path to it, and retire
+				// the base entry (trashRemote removes it). link runs before
+				// every trash, so the place is never left unclaimed.
+				addedActions.push({
+					type: "link",
+					id: r.id,
+					localPath: pathOf(le.parent, le.name),
+					kind: base[baseId]!.kind,
+				});
+				duplicatePages.push(baseId);
+			}
+			continue;
+		}
 		if (r.kind === "folder") {
 			addedActions.push({
 				type: "createLocalFolder",
@@ -333,6 +434,22 @@ export function plan(input: PlanInput): Action[] {
 		(a) =>
 			a.type !== "createRemoteFolder" && a.type !== "createLocalFolder",
 	);
+	const movingIds = new Set(
+		moves
+			.filter((m) => "id" in m)
+			.map((m) => (m as { id: string }).id),
+	);
+	duplicateAt(base, local, remote, trashes, depthOf, movingIds);
+	const queued = new Set(
+		trashes
+			.map((t) => ("id" in t.action ? t.action.id : null))
+			.filter((id): id is string => id !== null),
+	);
+	for (const id of duplicatePages) {
+		if (queued.has(id)) continue;
+		queued.add(id);
+		trashes.push({ action: { type: "trashRemote", id }, depth: 0 });
+	}
 	trashes.sort((x, y) => y.depth - x.depth);
 
 	folderRecreates.sort(

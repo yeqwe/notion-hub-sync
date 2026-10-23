@@ -355,7 +355,7 @@ describe("plan: added items", () => {
 			}),
 		);
 		expect(acts).toEqual([
-			{ type: "link", id: "r1", localPath: "note.md" },
+			{ type: "link", id: "r1", localPath: "note.md", kind: "note" },
 		]);
 	});
 
@@ -395,7 +395,9 @@ describe("plan: added items", () => {
 				pathOf: () => "Sub",
 			}),
 		);
-		expect(acts).toEqual([{ type: "link", id: "rf", localPath: "Sub" }]);
+		expect(acts).toEqual([
+			{ type: "link", id: "rf", localPath: "Sub", kind: "folder" },
+		]);
 	});
 
 	it("unmatched local note → pushNew; unmatched remote file → pullNew", () => {
