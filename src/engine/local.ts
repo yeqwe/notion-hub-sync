@@ -11,7 +11,7 @@ import {
 	type VaultIO,
 } from "../sync/vault-io";
 import type { SyncState, SyncEntry } from "../sync/state";
-import { childDirOf } from "../sync/paths";
+import { childDirOf, normalizeVaultPath } from "../sync/paths";
 import type { BlockedPath } from "../sync/blocked";
 import type { Scope } from "../sync/scope";
 import type { LocalAdded, ParentRef, Side } from "./types";
@@ -37,24 +37,24 @@ export interface LocalSnapshot {
  *
  * Both are blocked rather than picking a winner: which one is "right" is
  * not knowable from here, and silently dropping either loses content.
- * Case-SENSITIVE filesystems (Linux) are unaffected — there the two paths
- * are genuinely distinct, so the check only fires when both exist... which
- * they then legitimately can. The guard is therefore limited to *remote*
- * entries whose local twins collide, which is the only shape that breaks
- * a case-insensitive disk.
+ *
+ * Comparison happens on the NFC-normalized form. macOS reports filenames
+ * as NFD; without normalizing, `café` from the disk and `café` from Notion
+ * are different strings and neither this check NOR the engine's own path
+ * lookup ever matches.
  */
 export function findCaseConflicts(
 	paths: readonly string[],
 ): Map<string, string[]> {
-	const byLower = new Map<string, string[]>();
+	const byKey = new Map<string, string[]>();
 	for (const p of paths) {
-		const key = p.toLowerCase();
-		const list = byLower.get(key);
+		const key = normalizeVaultPath(p).toLowerCase();
+		const list = byKey.get(key);
 		if (list) list.push(p);
-		else byLower.set(key, [p]);
+		else byKey.set(key, [p]);
 	}
 	const out = new Map<string, string[]>();
-	for (const list of byLower.values()) {
+	for (const list of byKey.values()) {
 		if (list.length < 2) continue;
 		for (const p of list) {
 			out.set(p, list.filter((o) => o !== p));
@@ -94,11 +94,19 @@ export async function snapshotLocal(
 		(!scope || scope.allows(p, isDir)) && isSyncablePath(p);
 	const files = raw.files.filter((f) => inScope(f.path, false));
 	const folders = raw.folders.filter((f) => inScope(f, true));
+	// NFC-normalize every path straight off the disk. macOS hands back NFD,
+	// Notion hands back NFC; comparing the two forms makes an unchanged file
+	// look deleted (→ the remote page gets trashed) and unnoticed (→ it is
+	// pushed again every round). Normalizing here makes both sides agree by
+	// construction, and every Map below is keyed on the same form.
 	const fileByPath = new Map<string, VaultFile>();
 	for (const f of files) {
-		fileByPath.set(f.path, f);
+		const p = normalizeVaultPath(f.path);
+		fileByPath.set(p, p === f.path ? f : { ...f, path: p });
 	}
-	const folderSet = new Set(folders.filter((f) => f !== ""));
+	const folderSet = new Set(
+		folders.map((f) => normalizeVaultPath(f)).filter((f) => f !== ""),
+	);
 
 	// Case-clashing local twins: both blocked, neither pushed nor deleted.
 	const blocked: BlockedPath[] = [];
@@ -119,7 +127,7 @@ export async function snapshotLocal(
 	const pathOf = new Map<string, string>();
 	const folderIdByPath = new Map<string, string>([["", "root"]]);
 	for (const [id, e] of Object.entries(state.entries)) {
-		const p = applyRenameHints(e.path, hints);
+		const p = normalizeVaultPath(applyRenameHints(e.path, hints));
 		pathOf.set(id, p);
 		if (e.kind === "folder") folderIdByPath.set(p, id);
 	}

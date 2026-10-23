@@ -8,8 +8,14 @@ import {
 } from "./toggle";
 import { renderMatchesSource } from "./source-compare";
 import { sha256Hex } from "./hashes";
+import { writeTextVerified, writeVerified } from "./vault-io";
 import { basename, parentDir } from "./vault-io";
-import { collisionFreePath, conflictPath, sanitizeTitle } from "./paths";
+import {
+	collisionFreePath,
+	conflictPath,
+	safeFileName,
+	sanitizeTitle,
+} from "./paths";
 import { classifyPage, listChildPages } from "./tree";
 import { safeRecordVersion } from "./history";
 import type { SyncEntry } from "./state";
@@ -148,10 +154,15 @@ export function assignPaths(nodes: Node[]): void {
 	const used = new Set<string>();
 	for (const n of nodes) {
 		const dir = childDir(n.parent);
-		const name =
+		// `safeFileName` only here: this is where a NEW path is minted for the
+		// disk. Applying it inside `sanitizeTitle` would also rewrite titles
+		// derived from existing entries, which makes a page stop matching its
+		// own base record (→ a rename every round).
+		const base =
 			n.kind === "note"
 				? `${sanitizeTitle(n.title)}.md`
 				: sanitizeTitle(n.title);
+		const name = safeFileName(base);
 		n.path = collisionFreePath(dir, name, used);
 	}
 }
@@ -224,6 +235,16 @@ export interface FetchedNote {
 	decision: ReturnType<typeof decidePullContent>;
 }
 
+/** Ceiling for one downloaded note's raw markdown. Not a Notion limit — a
+ * "this is not what you think it is" guard: a page whose markdown endpoint
+ * returns hundreds of megabytes is a runaway render (nested embeds, an
+ * exported database that got flattened) and pulling it would freeze the
+ * editor before the user can even see it. */
+const NOTE_MAX_BYTES = 32 * 1024 * 1024;
+
+/** Exposed so the guard's threshold can be asserted without allocating it. */
+export const NOTE_MAX_BYTES_FOR_TEST = NOTE_MAX_BYTES;
+
 export async function fetchNoteContent(
 	deps: SyncDeps,
 	pageId: string,
@@ -233,7 +254,13 @@ export async function fetchNoteContent(
 		"GET",
 		`/pages/${pageId}/markdown`,
 	);
-	const split = await splitPageMarkdown(res.markdown ?? "");
+	const raw = res.markdown ?? "";
+	// Checked on the decoded string (that is the only size the API gives us)
+	// before any of the expensive parsing below runs.
+	if (raw.length > NOTE_MAX_BYTES) {
+		throw new RemoteTooLargeError(pageId, raw.length, NOTE_MAX_BYTES);
+	}
+	const split = await splitPageMarkdown(raw);
 	const visSha = await visibleHash(split.visible);
 	const decision = decidePullContent(split, visSha);
 	let bytes: Uint8Array;
@@ -325,8 +352,7 @@ export class RemoteTooLargeError extends Error {
 }
 
 /** `size` reported on a media block, in bytes; null when the block has none.
- * Notion puts it under the block's own type key (`file.size` etc.). */
-function blockSize(block: Record<string, unknown>): number | null {
+ * Notion puts it under the block's own type key (`file.size` etc.). */function blockSize(block: Record<string, unknown>): number | null {
 	const payload = block[block.type as string] as
 		| { size?: unknown }
 		| undefined;
@@ -354,7 +380,11 @@ async function pullNote(
 		!!entry,
 		report,
 	);
-	await deps.vault.writeText(path, new TextDecoder().decode(bytes));
+	// Verified: the base records `localHash` below, and a truncated write
+	// would make that record permanently wrong (next round: "local == base"
+	// → never repaired).
+	const text = new TextDecoder().decode(bytes);
+	await writeTextVerified(deps.vault, path, text, await sha256Hex(bytes));
 	recordEntry(deps, node, path, "note", {
 		srcSha: split.source?.srcSha,
 		visSha,
@@ -383,8 +413,8 @@ async function pullFile(
 		!!entry,
 		report,
 	);
-	await deps.vault.writeBinary(path, data.buffer as ArrayBuffer);
 	const fileSha = await sha256Hex(data);
+	await writeVerified(deps.vault, path, data, fileSha);
 	recordEntry(deps, node, path, "file", {
 		fileSha,
 		localHash: fileSha,

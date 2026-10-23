@@ -6,10 +6,13 @@ import {
 	existsSync,
 	statSync,
 	renameSync,
+	unlinkSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import type { VaultFile, VaultIO } from "../src/sync/vault-io";
+import { WriteVerificationError } from "../src/sync/vault-io";
 import { RenameTracker } from "../src/sync/rename-tracker";
+import { sha256Hex } from "../src/sync/hashes";
 
 /** fs-backed VaultIO rooted at a temp dir — used in live tests. */
 export class NodeVaultIO implements VaultIO {
@@ -59,6 +62,52 @@ export class NodeVaultIO implements VaultIO {
 		this.writes.expect(path, path);
 		await this.mkdirp(dirname(path) === "." ? "" : dirname(path));
 		writeFileSync(this.abs(path), Buffer.from(data));
+	}
+
+	async writeBinaryVerified(
+		path: string,
+		data: ArrayBuffer,
+		expectedSha: string,
+	): Promise<void> {
+		await this.writeVerified(path, new Uint8Array(data), expectedSha);
+	}
+
+	async writeTextVerified(
+		path: string,
+		content: string,
+		expectedSha: string,
+	): Promise<void> {
+		await this.writeVerified(
+			path,
+			new TextEncoder().encode(content),
+			expectedSha,
+		);
+	}
+
+	/** Mirrors ObsidianVaultIO: temp file → read back → hash → move. */
+	private async writeVerified(
+		path: string,
+		bytes: Uint8Array,
+		expectedSha: string,
+	): Promise<void> {
+		const tmp = `${path}.nhs-tmp`;
+		this.writes.expect(tmp, tmp);
+		await this.mkdirp(dirname(path) === "." ? "" : dirname(path));
+		writeFileSync(this.abs(tmp), Buffer.from(bytes));
+		try {
+			const actual = await sha256Hex(readFileSync(this.abs(tmp)));
+			if (actual !== expectedSha) {
+				throw new WriteVerificationError(path, expectedSha, actual);
+			}
+		} finally {
+			try {
+				unlinkSync(this.abs(tmp));
+			} catch {
+				// already gone
+			}
+		}
+		this.writes.expect(path, path);
+		writeFileSync(this.abs(path), Buffer.from(bytes));
 	}
 
 	async mkdirp(path: string): Promise<void> {

@@ -1,5 +1,6 @@
 import { calloutTypeForIcon, UNKNOWN_CALLOUT_ICON } from "./icons";
 import { inlineToObsidian, type PullInlineContext } from "./inline";
+import { isTableFragment, parseHtmlTable, rowsToGfm } from "./html-table";
 import type { LinkResolver } from "./links";
 
 export interface NotionToObsidianContext {
@@ -76,6 +77,31 @@ function parseBlocks(lines: string[]): Block[] {
 		return { inner, next: j };
 	};
 
+	/** Collect an HTML table by TAG DEPTH, not by line shape.
+	 *
+	 * A table pasted from a web page is one long line, so a "stop at the line
+	 * that starts with </table>" rule never fires; and a nested table closes
+	 * its parent early. Counting `<table` / `</table>` handles both. */
+	const collectHtmlTable = (
+		start: number,
+	): { block: string; next: number } => {
+		const collected: string[] = [];
+		let depth = 0;
+		let j = start;
+		for (; j < lines.length; j++) {
+			const l = lines[j]!;
+			collected.push(l);
+		const opens = (l.match(/\\?<table\b/gi) ?? []).length;
+			const closes = (l.match(/\\?<\/table\s*\\?>/gi) ?? []).length;
+			depth += opens - closes;
+			if (depth <= 0 && closes > 0) {
+				j++;
+				break;
+			}
+		}
+		return { block: collected.join("\n"), next: j };
+	};
+
 	while (i < lines.length) {
 		const line = lines[i]!;
 		const trimmed = line.trim();
@@ -84,6 +110,7 @@ function parseBlocks(lines: string[]): Block[] {
 			i++;
 			continue;
 		}
+
 
 		const fence = trimmed.match(FENCE);
 		if (fence) {
@@ -121,11 +148,17 @@ function parseBlocks(lines: string[]): Block[] {
 			i = j + 1;
 			continue;
 		}
-		if (/^<table[\s>]/.test(trimmed)) {
-			const { inner, next } = collectUntil(i, (t) =>
-				t.startsWith("</table"),
-			);
-			blocks.push({ kind: "table", indent, first: "", inner });
+		// Escaped form first: older pushes wrote `\<table\>` into the page when
+		// the table fell through to the plain-text path. Those pages are still
+		// out there and must be recovered, not copied verbatim into the note.
+		const unescaped = trimmed.replace(/\\(.)/g, "$1");
+		if (/^<table[\s>]/.test(unescaped)) {
+			// Structural parse, not line-based: a table pasted from a web page
+			// arrives as ONE line, and a line-based reader never finds its
+			// `</table>` — the table's content is then silently dropped while
+			// its closing tags leak into the note as prose.
+			const { block, next } = collectHtmlTable(i);
+			blocks.push({ kind: "table", indent, first: block, inner: [] });
 			i = next;
 			continue;
 		}
@@ -210,6 +243,15 @@ function parseBlocks(lines: string[]): Block[] {
 			i++;
 			continue;
 		}
+		// A stray table tag left over from a rendered (or half-written) table
+		// is NOT prose. Writing it into the note made the file differ from the
+		// page on every round, so the engine pulled it again forever and the
+		// user saw "modified" notes they never touched. Checked AFTER the
+		// <table> branch above so a real table is never mistaken for debris.
+		if (isTableFragment(trimmed)) {
+			i++;
+			continue;
+		}
 
 		// leaf line; children = following lines with deeper indent
 		// (kept with their absolute indentation)
@@ -234,35 +276,25 @@ function isListItem(block: Block): boolean {
 }
 
 function renderTable(inner: string[], ctx: PullInlineContext): string {
-	const rows: string[][] = [];
-	let current: string[] | null = null;
-	for (const raw of inner) {
-		const t = raw.trim();
-		if (t === "<tr>") {
-			current = [];
-		} else if (t.startsWith("</tr")) {
-			if (current) {
-				rows.push(current);
-			}
-			current = null;
-		} else if (current && t.startsWith("<td>")) {
-			const cell = t.slice(4, t.endsWith("</td>") ? -5 : undefined);
-			current.push(
-				inlineToObsidian(cell, ctx, { keepEscapedPipes: true }),
-			);
-		}
-	}
-	if (rows.length === 0) {
-		return "";
-	}
-	const cols = Math.max(...rows.map((r) => r.length));
-	const fmt = (r: string[]) =>
-		`| ${Array.from({ length: cols }, (_, k) => r[k] ?? "").join(" | ")} |`;
-	const out = [fmt(rows[0]!), `|${" --- |".repeat(cols)}`];
-	for (const r of rows.slice(1)) {
-		out.push(fmt(r));
-	}
-	return out.join("\n");
+	return renderHtmlTable(inner.join("\n"), ctx);
+}
+
+/** Render an HTML table block (one line or many) as GFM.
+ *
+ * Structural parsing means a nested `<table>` cannot truncate its parent and
+ * a stray `</tr>` cannot become a paragraph — both of which used to corrupt
+ * the note on every pull. */
+function renderHtmlTable(raw: string, ctx: PullInlineContext): string {
+	const parsed = parseHtmlTable(raw);
+	if (parsed === null) return "";
+	// `keepEscapedPipes` makes the inline converter emit `\|` inside cells;
+	// GFM needs exactly that so a literal `|` does not split the row.
+	const rows = parsed.rows.map((row) =>
+		row.map((cell) =>
+			inlineToObsidian(cell, ctx, { keepEscapedPipes: true }),
+		),
+	);
+	return rowsToGfm({ rows, hasHeader: parsed.hasHeader }) ?? "";
 }
 
 function renderCallout(block: Block, ctx: PullInlineContext): string {
@@ -383,7 +415,7 @@ function renderBlock(
 		case "math":
 			return ["$$", ...block.inner, "$$"].join("\n");
 		case "table":
-			return renderTable(block.inner, ctx);
+			return renderHtmlTable(block.first, ctx);
 		case "callout":
 			return renderCallout(block, ctx);
 		case "details":

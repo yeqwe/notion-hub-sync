@@ -1,6 +1,6 @@
 {
 	"name": "notion-hub-sync",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "Sync your whole vault across devices through a Notion page tree.",
 	"main": "main.js",
 	"type": "module",

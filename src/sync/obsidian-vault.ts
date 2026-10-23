@@ -1,8 +1,10 @@
 import type { App, TAbstractFile, TFile, TFolder } from "obsidian";
 import type { VaultFile, VaultIO } from "./vault-io";
+import { WriteVerificationError } from "./vault-io";
 import { emptyState, type SyncState } from "./state";
 import { isSyncablePath, parentDir } from "./vault-io";
 import { RenameTracker } from "./rename-tracker";
+import { sha256Hex } from "./hashes";
 
 const STATE_FILE = "sync-state.json";
 
@@ -70,6 +72,77 @@ export class ObsidianVaultIO implements VaultIO {
 		} else {
 			await this.mkdirp(parentDir(path));
 			await this.app.vault.createBinary(path, data);
+		}
+	}
+
+	/**
+	 * Verified binary write: temp file → read back → compare → move into place.
+	 *
+	 * Reading back rather than trusting `writeBinary`'s promise is the whole
+	 * point: the adapter resolves once the write is *queued* on some platforms,
+	 * and a partially flushed file looks identical to a complete one until you
+	 * hash it. Falling back to a direct write is NOT an option here — that is
+	 * the behaviour this method exists to replace.
+	 */
+	async writeBinaryVerified(
+		path: string,
+		data: ArrayBuffer,
+		expectedSha: string,
+	): Promise<void> {
+		await this.writeVerified(path, new Uint8Array(data), expectedSha);
+	}
+
+	/** Text twin of {@link writeBinaryVerified} — compared on the encoded
+	 * bytes so the hash matches what the remote side recorded. */
+	async writeTextVerified(
+		path: string,
+		content: string,
+		expectedSha: string,
+	): Promise<void> {
+		await this.writeVerified(
+			path,
+			new TextEncoder().encode(content),
+			expectedSha,
+		);
+	}
+
+	private async writeVerified(
+		path: string,
+		bytes: Uint8Array,
+		expectedSha: string,
+	): Promise<void> {
+		const tmp = `${path}.nhs-tmp`;
+		this.writes.expect(tmp, tmp);
+		await this.mkdirp(parentDir(path));
+		const buf = bytes.buffer.slice(
+			bytes.byteOffset,
+			bytes.byteOffset + bytes.byteLength,
+		) as ArrayBuffer;
+		try {
+			const existingTmp = this.app.vault.getAbstractFileByPath(tmp);
+			if (existingTmp) {
+				await this.app.vault.modifyBinary(existingTmp as TFile, buf);
+			} else {
+				await this.app.vault.createBinary(tmp, buf);
+			}
+			const readBack = new Uint8Array(
+				await this.app.vault.adapter.readBinary(tmp),
+			);
+			const actual = await sha256Hex(readBack);
+			if (actual !== expectedSha) {
+				throw new WriteVerificationError(path, expectedSha, actual);
+			}
+		} finally {
+			await this.app.vault.adapter.remove(tmp).catch(() => undefined);
+		}
+		// Verified. Only now may the target change — a failure above leaves
+		// the previous content exactly as it was.
+		this.writes.expect(path, path);
+		const existing = this.app.vault.getAbstractFileByPath(path);
+		if (existing) {
+			await this.app.vault.modifyBinary(existing as TFile, buf);
+		} else {
+			await this.app.vault.createBinary(path, buf);
 		}
 	}
 

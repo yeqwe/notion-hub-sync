@@ -20,6 +20,12 @@ const HEADING = /^(#{1,6})\s+(.*)$/;
 const QUOTE_LINE = /^\s{0,3}>( ?)(.*)$/;
 const CALLOUT_FIRST = /^\s{0,3}>\s*\[!([A-Za-z]+)\]([+-])?[ \t]*(.*)$/;
 const LIST_ITEM = /^([ \t]*)([-*+]|\d+[.)])([ \t]+)(\[[ xX]\][ \t]+)?(.*)$/;
+import {
+	parseHtmlTable,
+	rowsToNotionTable,
+	splitGfmRow,
+} from "./html-table";
+
 const TABLE_DELIM = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
 const UNKNOWN_COMMENT = /^<!--\s*notion-unknown\s+(.*?)\s*-->\s*$/;
 
@@ -33,6 +39,41 @@ function isTableStart(lines: string[], i: number): boolean {
 		return false;
 	}
 	return lines[i]!.includes("|") && TABLE_DELIM.test(lines[i + 1]!);
+}
+
+/**
+ * A table that is already HTML (`<table><tr><td>…`), as pasted from a web
+ * page or exported by another tool.
+ *
+ * This must be recognised BEFORE the plain-text path: the plain path escapes
+ * `<` and `>`, so the table becomes `\<table\>\<tr\>…` on the Notion side —
+ * literal text where a table used to be. That is unrecoverable data loss, and
+ * it also makes every following round look like a remote change.
+ */
+function isHtmlTableStart(lines: string[], i: number): boolean {
+	return /^\s*(?:\\?<)table\b/i.test(lines[i] ?? "");
+}
+
+/** Collect the lines belonging to one HTML table block (may be one line). */
+function collectHtmlTable(
+	lines: string[],
+	i: number,
+): { block: string; next: number } {
+	const collected: string[] = [];
+	let depth = 0;
+	let j = i;
+	for (; j < lines.length; j++) {
+		const line = lines[j]!;
+		collected.push(line);
+		const opens = (line.match(/<table\b/gi) ?? []).length;
+		const closes = (line.match(/<\/table\s*>/gi) ?? []).length;
+		depth += opens - closes;
+		if (depth <= 0 && closes > 0) {
+			j++;
+			break;
+		}
+	}
+	return { block: collected.join("\n"), next: j };
 }
 
 function startsBlock(lines: string[], i: number): boolean {
@@ -53,29 +94,7 @@ function startsBlock(lines: string[], i: number): boolean {
 }
 
 function splitTableRow(line: string): string[] {
-	let s = line.trim();
-	if (s.startsWith("|")) {
-		s = s.slice(1);
-	}
-	if (s.endsWith("|") && !s.endsWith("\\|")) {
-		s = s.slice(0, -1);
-	}
-	const cells: string[] = [];
-	let cur = "";
-	for (let i = 0; i < s.length; i++) {
-		const c = s[i] as string;
-		if (c === "\\" && s[i + 1] === "|") {
-			cur += "|";
-			i++;
-		} else if (c === "|") {
-			cells.push(cur);
-			cur = "";
-		} else {
-			cur += c;
-		}
-	}
-	cells.push(cur);
-	return cells.map((c) => c.trim());
+	return splitGfmRow(line);
 }
 
 function convertTable(
@@ -83,24 +102,16 @@ function convertTable(
 	i: number,
 	ctx: PushInlineContext,
 ): { block: string; next: number } {
-	const out: string[] = ['<table header-row="true">'];
-	const emitRow = (line: string) => {
-		out.push("<tr>");
-		for (const cell of splitTableRow(line)) {
-			out.push(
-				`<td>${inlineToNotion(cell, ctx).replace(/\|/g, "\\|")}</td>`,
-			);
-		}
-		out.push("</tr>");
-	};
-	emitRow(lines[i]!);
+	const rows: string[][] = [splitTableRow(lines[i]!)];
 	let j = i + 2; // skip delimiter row
 	while (j < lines.length && lines[j]!.includes("|") && lines[j]!.trim() !== "") {
-		emitRow(lines[j]!);
+		rows.push(splitTableRow(lines[j]!));
 		j++;
 	}
-	out.push("</table>");
-	return { block: out.join("\n"), next: j };
+	return {
+		block: rowsToNotionTable(rows, (c) => inlineToNotion(c, ctx)),
+		next: j,
+	};
 }
 
 function convertFence(
@@ -327,6 +338,23 @@ export function obsidianToNotion(
 			result = convertFence(lines, i);
 		} else if (line.trim().startsWith("$$")) {
 			result = convertMathBlock(lines, i);
+		} else if (isHtmlTableStart(lines, i)) {
+			// Must come before the plain-text path: escaping `<` would turn a
+			// real table into literal `\<table\>` text on the Notion side.
+			const { block, next } = collectHtmlTable(lines, i);
+			const parsed = parseHtmlTable(block);
+			if (parsed === null) {
+				// Unparseable table markup: drop it rather than escape it into
+				// the page. Escaped soup looks like content and survives forever.
+				result = { block: "", next };
+			} else {
+				result = {
+					block: rowsToNotionTable(parsed.rows, (c) =>
+						inlineToNotion(c, pushCtx),
+					),
+					next,
+				};
+			}
 		} else if (isTableStart(lines, i)) {
 			result = convertTable(lines, i, pushCtx);
 		} else if (QUOTE_LINE.test(line)) {
