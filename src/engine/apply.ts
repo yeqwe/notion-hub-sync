@@ -565,6 +565,35 @@ function localParentRef(path: string): ParentRef {
 	return { newLocal: dir };
 }
 
+/** Take over an existing page as the remote copy of `old`, instead of
+ * creating a new one. Used by `recreateRemote` when another device already
+ * re-created the item: its page id is unknown to the base here (that is why
+ * it showed up as "added"), but it IS the item — adopting it makes both
+ * devices converge on one id instead of each deleting the other's page. */
+async function adoptRemotePage(
+	ctx: ApplyCtx,
+	old: SyncEntry,
+	pageId: string,
+): Promise<string> {
+	const id = pageId.replace(/-/g, "").toLowerCase();
+	const parentId = await parentIdOf(ctx, localParentRef(old.path));
+	recordEntry(ctx, id, old.path, old.kind, parentId, {
+		remoteEdited: addedLastEdited(ctx, id),
+	});
+	// a note's content lives in the page: keep the local bytes as the base so
+	// the next merge has a three-way anchor
+	if (old.kind === "note") {
+		try {
+			const buf = new Uint8Array(await ctx.deps.vault.readBinary(old.path));
+			await ctx.baseStore.putIfFits(id, buf);
+		} catch {
+			/* unreadable local copy: leave the base empty */
+		}
+	}
+	await checkpoint(ctx, true);
+	return id;
+}
+
 async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 	const { deps, report } = ctx;
 	const state = deps.state;
@@ -929,8 +958,14 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 			delete state.entries[action.id];
 			await ctx.baseStore.remove(action.id);
 			if (old) {
-				const parent = localParentRef(old.path);
-				const newId = await pushNew(ctx, old.path, old.kind, parent);
+				const newId = action.adopt
+					? await adoptRemotePage(ctx, old, action.adopt)
+					: await pushNew(
+							ctx,
+							old.path,
+							old.kind,
+							localParentRef(old.path),
+						);
 				ctx.recreated.set(action.id, newId);
 				if (old.kind === "folder") {
 					ctx.localSnap.folderIdByPath.set(old.path, newId);

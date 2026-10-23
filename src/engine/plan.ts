@@ -20,27 +20,27 @@ function sameParent(a: ParentRef, b: ParentRef): boolean {
 	return parentKey(a) === parentKey(b);
 }
 
-/** Two entries claiming ONE place. Only reachable when two devices each
- * created a page for the same new item — a folder carries no content, so
- * nothing else can tell them apart. The extra one is a duplicate by
- * definition: leaving it alive makes every later action fire twice (two
- * PATCHes for one rename, a trash that fails on the archived ancestor of
- * its twin, a content push onto the wrong page).
+/** Groups of base entries that all claim ONE place. Only the first survives;
+ * the rest are dropped from the plan entirely (`returned` as ids to retire),
+ * so the main decision loop never sees them — letting it run would produce
+ * `trashLocal` for a directory another entry still needs.
  *
- * `moving` ids are skipped — their location is still changing this round,
- * so "same place" is not yet decided. */
+ * The survivor is the entry whose remote page still exists (trashing it and
+ * keeping a dead one forces a re-create, and a re-created page gets a new id
+ * the other device never learns — that is the recreate/trash ping-pong).
+ * Among equals the lowest page id wins, because hex32 compares identically
+ * on every device and they must all agree. */
 function duplicateAt(
 	base: Record<string, BaseNode>,
 	local: Record<string, Side>,
 	remote: Record<string, Side>,
-	trashes: Array<{ action: Action; depth: number }>,
-	depthOf: (id: string) => number,
-	moving: ReadonlySet<string>,
-): void {
+): { dead: string[]; alive: string[] } {
+	const dead: string[] = [];
+	const alive: string[] = [];
 	const groups = new Map<string, string[]>();
 	for (const [id, b] of Object.entries(base)) {
 		const le = local[id];
-		if (!le || le.deleted || moving.has(id)) continue;
+		if (!le || le.deleted) continue;
 		const key = `${b.kind}\u0000${parentKey(le.parent)}\u0000${le.name}`;
 		const ids = groups.get(key);
 		if (ids) ids.push(id);
@@ -48,20 +48,18 @@ function duplicateAt(
 	}
 	for (const ids of groups.values()) {
 		if (ids.length < 2) continue;
-		// Every device must keep the SAME one, or two of them each trash
-		// the other's pick and the place ends up with no page at all. The
-		// lowest page id wins: ids are hex32, so the order is the same
-		// everywhere.
-		const keep = [...ids].sort()[0]!;
+		const winner = [...ids].sort((a, b) => {
+			const aDead = remote[a]?.deleted === true ? 1 : 0;
+			const bDead = remote[b]?.deleted === true ? 1 : 0;
+			return aDead - bDead || (a < b ? -1 : a > b ? 1 : 0);
+		})[0]!;
 		for (const id of ids) {
-			if (id === keep) continue;
-			if (remote[id]?.deleted === true) continue;
-			trashes.push({
-				action: { type: "trashRemote", id },
-				depth: depthOf(id),
-			});
+			if (id === winner) continue;
+			if (remote[id]?.deleted === true) dead.push(id);
+			else alive.push(id);
 		}
 	}
+	return { dead, alive };
 }
 
 interface Eval {
@@ -290,7 +288,23 @@ export function plan(input: PlanInput): Action[] {
 				continue;
 			}
 			if (baseId < r.id) {
-				// keep the entry this device already has
+				// keep the entry this device already has — unless its remote copy
+				// is known to be gone, or was not evaluated at all. A page at
+				// this place that the base has no live id for means the base id
+				// names a page that is no longer there: the newcomer IS the
+				// replacement, so adopt it. Deleting it instead would make the
+				// other device re-create it, under yet another id.
+				const baseAlive = remote[baseId]?.deleted === false;
+				if (!baseAlive) {
+					addedActions.push({
+						type: "link",
+						id: r.id,
+						localPath: pathOf(le.parent, le.name),
+						kind: base[baseId]!.kind,
+					});
+					duplicatePages.push(baseId);
+					continue;
+				}
 				duplicatePages.push(r.id);
 			} else {
 				// the remote page wins: bind the local path to it, and retire
@@ -346,6 +360,16 @@ export function plan(input: PlanInput): Action[] {
 		for (const a of remoteAdded) stillNeeded.add(parentKey(a.parent));
 	}
 
+	// ----- duplicate entries (two ids, one place) -----
+	// Decided BEFORE the per-id loop so a duplicate never reaches it: letting
+	// the loop see one would produce trashLocal for a directory the surviving
+	// entry still needs.
+	const dups = duplicateAt(base, local, remote);
+	// a dead duplicate's page is gone: drop the entry. An alive one is a real
+	// second page → trash it (its twin keeps the place).
+	const dupForgets: Action[] = dups.dead.map((id) => ({ type: "forget", id }));
+	const dupTrashes = dups.alive.map((id) => ({ type: "trashRemote" as const, id }));
+
 	// ----- per-id decision -----
 	const moves: Action[] = [];
 	const contents: Action[] = [];
@@ -353,11 +377,39 @@ export function plan(input: PlanInput): Action[] {
 	const forgets: Action[] = [];
 	const folderRecreates: Extract<Action, { type: "recreateRemote" }>[] =
 		[];
+
+	// Remote pages that may be adopted by a `recreateRemote`: the place is
+	// spoken for by a base entry whose REMOTE copy is gone (that is why the
+	// item is being re-created). Such a page is the re-creation another device
+	// already performed — its id never reached this base, so it arrives as
+	// `remoteAdded`. Adopting it makes both devices converge on one id;
+	// minting a second page would leave them deleting each other's forever.
+	//
+	// Entries still alive remotely are NOT adoptable: their place is taken and
+	// `duplicatePages` decides those.
+	const adoptable = new Map<string, string>();
+	for (const [id, b] of Object.entries(base)) {
+		const le = local[id];
+		if (!le || le.deleted) continue;
+		if (remote[id]?.deleted !== true) continue;
+		const key = `${parentKey(le.parent)}\u0000${b.name}`;
+		// the placeholder marks "this place wants a page"; the actual id is
+		// filled in from remoteAdded below
+		adoptable.set(key, "");
+	}
+	for (const r of remoteAdded) {
+		if (matchedRemote.has(r.id) || duplicatePages.includes(r.id)) continue;
+		const key = `${parentKey(r.parent)}\u0000${r.name}`;
+		if (!adoptable.has(key)) continue;
+		if (adoptable.get(key) === "") adoptable.set(key, r.id);
+	}
 	const depthOf = makeDepth(base);
 
 	for (const [id, b] of Object.entries(base)) {
 		const { le, re } = evals.get(id)!;
 		const isFolder = b.kind === "folder";
+
+		if (dups.dead.includes(id) || dups.alive.includes(id)) continue;
 
 		if (le.deleted && re.deleted) {
 			forgets.push({ type: "forget", id });
@@ -377,15 +429,32 @@ export function plan(input: PlanInput): Action[] {
 			continue;
 		}
 		if (re.deleted) {
+			// A page at the same place that nobody claims is this item's
+			// re-creation by another device — reuse it instead of minting yet
+			// another id that the other device would delete as a duplicate.
+			const adopt =
+				le.side === null
+					? undefined
+					: adoptable.get(
+							`${parentKey(le.side.parent)}\u0000${b.name}`,
+						) || undefined;
 			if (
 				isFolder &&
 				(le.changed || stillNeeded.has(`id:${id}`))
 			) {
 				// still needed locally → recreate the page (children that
 				// resolve their parent by id get remapped at apply time)
-				folderRecreates.push({ type: "recreateRemote", id });
+				folderRecreates.push({
+					type: "recreateRemote",
+					id,
+					...(adopt === undefined ? {} : { adopt }),
+				});
 			} else if (le.changed) {
-				contents.push({ type: "recreateRemote", id });
+				contents.push({
+					type: "recreateRemote",
+					id,
+					...(adopt === undefined ? {} : { adopt }),
+				});
 			} else {
 				trashes.push({
 					action: { type: "trashLocal", id },
@@ -464,12 +533,10 @@ export function plan(input: PlanInput): Action[] {
 		(a) =>
 			a.type !== "createRemoteFolder" && a.type !== "createLocalFolder",
 	);
-	const movingIds = new Set(
-		moves
-			.filter((m) => "id" in m)
-			.map((m) => (m as { id: string }).id),
-	);
-	duplicateAt(base, local, remote, trashes, depthOf, movingIds);
+	for (const a of dupTrashes) {
+		trashes.push({ action: a, depth: 0 });
+	}
+	forgets.push(...dupForgets);
 	const queued = new Set(
 		trashes
 			.map((t) => ("id" in t.action ? t.action.id : null))

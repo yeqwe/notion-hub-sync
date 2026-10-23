@@ -75,6 +75,11 @@ export type Action =
 	| { type: "moveLocal"; id: string; parent: ParentRef; name: string }
 	| { type: "trashRemote"; id: string }
 	| { type: "trashLocal"; id: string }
-	| { type: "recreateRemote"; id: string }
+	/** Re-create a page whose remote copy is gone. `adopt` names an existing
+	 * unclaimed page at the same place: reusing it (instead of creating yet
+	 * another id) is what lets two devices converge — a freshly created id is
+	 * unknown to the other device, which deletes it as a duplicate and makes
+	 * this one create another, forever. */
+	| { type: "recreateRemote"; id: string; adopt?: string }
 	| { type: "restoreLocal"; id: string }
 	| { type: "forget"; id: string };

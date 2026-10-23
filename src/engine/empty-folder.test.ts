@@ -1,10 +1,10 @@
-﻿// Empty folders: the shape with no content to compare. A folder carries no
-// sha, so every decision about one rests on structure alone 鈥?which is
-// exactly were four bugs lived:
+// Empty folders: the shape with no content to compare. A folder carries no
+// sha, so every decision about one rests on structure alone - which is
+// exactly where the bugs lived:
 //
 //  1. trashRemote ran in one flat pool. Trashing a page archives its whole
 //     subtree, so a child queued in the same batch got 400 "archived
-//     ancestor" and its base entry could never be dropped 鈥?the failure
+//     ancestor" and its base entry could never be dropped - the failure
 //     repeated on every round.
 //  2. `link` stored an entry without a parentId, so the next round saw a
 //     move that never happened and issued moveRemote.
@@ -12,6 +12,14 @@
 //     note, which is a path that cannot exist in a vault.
 //  4. Two devices each creating a page for the same new directory left two
 //     live pages for one path; every later action then ran twice.
+//  5. A folder deleted on one side came back because a leftover duplicate
+//     page sat on the same place and was pulled in as "a new folder".
+//  6. Two entries claiming one place, one of them already archived remotely,
+//     made recreateRemote and trashRemote alternate forever: the dead entry
+//     was never dropped, so every round re-created it and the other device
+//     kept deleting the replacement.
+//  7. recreateRemote re-created a page another device had already
+//     re-created, minting a fresh id that device never learned.
 
 import { describe, expect, it } from "vitest";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
@@ -230,6 +238,68 @@ describe("empty folders", () => {
 		await b.sync();
 		expect(tree(a)).toEqual(["F/"]);
 		expect(tree(b)).toEqual(["F/"]);
+		expect(idle(await a.sync())).toBe(true);
+		expect(idle(await b.sync())).toBe(true);
+	});
+
+	it("a dead duplicate entry is dropped instead of re-created every round", async () => {
+		const { fake, rootId, a } = setup();
+		mkdirSync(join(a.dir, "A"));
+		await a.sync();
+
+		// A second page for the same place: the base ends up with two entries
+		// for one directory. They must collapse to ONE, and stay collapsed —
+		// a surviving dead entry re-creates a page every round while the other
+		// device deletes it again.
+		fake.humanCreatePage(rootId, "A", "📁");
+		await a.sync();
+		await a.sync();
+
+		const entries = Object.values(a.state.entries).filter(
+			(e) => e.kind === "folder" && e.path === "A",
+		);
+		expect(entries.length).toBe(1);
+		expect(titled(fake, "A").length).toBe(1);
+		expect(idle(await a.sync())).toBe(true);
+		expect(tree(a)).toEqual(["A/"]);
+	});
+
+	it("recreateRemote adopts the page another device already re-created", async () => {
+		const { fake, a, b } = setup();
+		// A folder whose CONTENT changed locally, with the remote page gone,
+		// is the case that re-creates: there is real work to keep.
+		a.write("P/keep.md", "v1\n");
+		await a.sync();
+		await b.sync();
+
+		fake.humanTrash(titled(fake, "P")[0]!.id);
+		// B re-creates the folder first (it has local changes to keep).
+		b.write("P/keep.md", "v2 edited\n");
+		await b.sync();
+		const afterB = titled(fake, "P").map((p) => p.id);
+		expect(afterB.length).toBe(1);
+
+		// A also still has the folder and its file, and also changed it. A
+		// must adopt B's page instead of minting a second one that B would
+		// then delete — that ping-pong never settles.
+		a.write("P/keep.md", "v3 from A\n");
+		await a.sync();
+		expect(titled(fake, "P").map((p) => p.id)).toEqual(afterB);
+
+		const aId = Object.entries(a.state.entries).find(
+			([, e]) => e.kind === "folder" && e.path === "P",
+		)?.[0];
+		const bId = Object.entries(b.state.entries).find(
+			([, e]) => e.kind === "folder" && e.path === "P",
+		)?.[0];
+		expect(aId).toBeDefined();
+		expect(aId).toBe(bId);
+		// content survives on both sides and nothing churns afterwards
+		for (let i = 0; i < 3; i++) {
+			await a.sync();
+			await b.sync();
+		}
+		expect(titled(fake, "P").length).toBe(1);
 		expect(idle(await a.sync())).toBe(true);
 		expect(idle(await b.sync())).toBe(true);
 	});
