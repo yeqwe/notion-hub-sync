@@ -190,12 +190,17 @@ async function stampLocal(ctx: ApplyCtx, e: SyncEntry): Promise<void> {
 	}
 }
 
-/** Re-hash the local file; false means it changed since the snapshot. */
+/** Re-hash the local file; false means it changed since the snapshot.
+ * A folder has no content to compare — and `readBinary` on a directory
+ * throws on every platform, which used to make every folder `trashLocal`
+ * look stale and get skipped (an empty directory stayed behind after its
+ * remote deletion, forever). */
 async function localShaCurrent(ctx: ApplyCtx, id: string): Promise<boolean> {
 	const side = ctx.localSnap.local[id];
 	if (!side || side.deleted) return true;
 	const e = entryOf(ctx, id);
 	if (!e) return false;
+	if (e.kind === "folder") return true;
 	try {
 		const buf = new Uint8Array(await ctx.deps.vault.readBinary(e.path));
 		return (await sha256Hex(buf)) === side.sha;
@@ -369,10 +374,22 @@ function actionGroup(
 		case "merge":
 			return { g: 4, pool: true };
 		case "trashRemote":
+			// Pooled: a bulk remote deletion is one serial action per file
+			// otherwise (pre-delete version upload + trash, ~4 requests per
+			// file at ~3 req/s). Each of these touches its own id/path only,
+			// so the semaphore is a safe bound. Trashing a page is per-page
+			// and order-independent, so plan order does not matter here.
+			return { g: 5, pool: true };
 		case "trashLocal":
-			return { g: 5, pool: false };
+			// Files are pooled. A DIRECTORY must wait until its children are
+			// gone (renaming a non-empty dir fails), so folders keep running
+			// serially afterwards — plan order is depth-descending, so every
+			// child (pooled file or inner folder) finishes before its folder.
+			return ctx.deps.state.entries[a.id]?.kind === "folder"
+				? { g: 6, pool: false }
+				: { g: 5, pool: true };
 		default:
-			return { g: 6, pool: false }; // forget
+			return { g: 7, pool: false }; // forget
 	}
 }
 

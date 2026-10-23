@@ -97,7 +97,13 @@ export class NodeVaultIO implements VaultIO {
 
 	async trash(path: string): Promise<void> {
 		this.writes.expect(path, path);
-		const dest = `.trash/${path}`;
+		// Trashing a folder's files first creates `.trash/<dir>/`, so trashing
+		// the now-empty `<dir>` must not collide with it — a real trash
+		// (OS recycle bin / Obsidian's .trash) suffixes instead of failing.
+		let dest = `.trash/${path}`;
+		for (let i = 2; existsSync(this.abs(dest)); i++) {
+			dest = `.trash/${path} (${i})`;
+		}
 		await this.mkdirp(dirname(dest));
 		renameSync(this.abs(path), this.abs(dest));
 	}
