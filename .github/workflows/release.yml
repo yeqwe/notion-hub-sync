@@ -32,7 +32,7 @@ jobs:
           MANIFEST=$(node -p "require('./manifest.json').version")
           echo "tag=$TAG manifest=$MANIFEST"
           test "$TAG" = "$MANIFEST"
-          node -p "require('./versions.json')" | grep -q "\"$TAG\"" || {
+          node -e "const v=require('./versions.json'); process.exit(v['$TAG'] ? 0 : 1)" || {
             echo "versions.json 缺少 $TAG"; exit 1; }
 
       - name: Create release
