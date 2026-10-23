@@ -11,6 +11,7 @@ import {
 import { dirname, join } from "node:path";
 import { FakeNotion } from "../../test-support/fake-notion";
 import { makeDevice, type Device } from "../../test-support/device";
+import { defaultConfigSync } from "./filter";
 
 function cwrite(d: Device, rel: string, content: string): void {
 	const abs = join(d.dir, ".obsidian", ...rel.split("/"));
@@ -125,6 +126,37 @@ describe("config-dir sync (offline)", () => {
 		await a.sync();
 		expect(findConflictCopy(a.dir)).toBeUndefined();
 		expect(findConflictCopy(b.dir)).toBeUndefined();
+	});
+
+	it("b4. installed community plugins reach B (code, not just the id list)", async () => {
+		// The reported bug: with only "installed community plugins" on, B used
+		// to receive `community-plugins.json` and nothing else — it learned
+		// dataview should be enabled and had no dataview.
+		const on = {
+			...defaultConfigSync(),
+			communityPlugin: true,
+		};
+		const fake = new FakeNotion();
+		const rootId = fake.humanCreatePage("", "root");
+		const a = makeDevice(fake, rootId, "a", { configSync: on });
+		const b = makeDevice(fake, rootId, "b", { configSync: on });
+		cwrite(a, "community-plugins.json", '["dataview"]');
+		cwrite(a, "plugins/dataview/manifest.json", '{"id":"dataview"}');
+		cwrite(a, "plugins/dataview/main.js", "module.exports={};");
+		cwrite(a, "plugins/dataview/styles.css", ".dv{}");
+		cwrite(a, "plugins/dataview/data.json", '{"apiKey":"secret"}');
+		await a.sync();
+		await b.sync();
+		expect(cread(b, "community-plugins.json")).toBe('["dataview"]');
+		expect(cread(b, "plugins/dataview/manifest.json")).toBe(
+			'{"id":"dataview"}',
+		);
+		expect(cread(b, "plugins/dataview/main.js")).toBe(
+			"module.exports={};",
+		);
+		expect(cread(b, "plugins/dataview/styles.css")).toBe(".dv{}");
+		// data.json stays out: it answers to communityPluginData, off here.
+		expect(cexists(b, "plugins/dataview/data.json")).toBe(false);
 	});
 
 	it("b3. a real JSON value change still syncs", async () => {

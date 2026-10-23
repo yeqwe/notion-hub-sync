@@ -111,12 +111,17 @@ function extLower(rel: string): string {
 	return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
-const PLUGIN_FILES = new Set([
-	"manifest.json",
-	"main.js",
-	"styles.css",
-	"data.json",
-]);
+// A plugin directory holds two different things, and they belong to two
+// different categories — the split Obsidian's own sync makes:
+//
+//  • the plugin itself (manifest + code + styles): "installed community
+//    plugins". Turning that switch on and getting only
+//    `community-plugins.json` (a list of ids) is not what the label says:
+//    the other device sees "dataview is enabled" and has no dataview.
+//  • its settings (`data.json`): "community plugin settings", separately
+//    opt-in because it may hold API keys.
+const PLUGIN_CODE_FILES = new Set(["manifest.json", "main.js", "styles.css"]);
+const PLUGIN_DATA_FILES = new Set(["data.json"]);
 
 /** rel (relative to configDir) is syncable under settings `c`; `selfId` =
  * our own plugin id — its dir holds the token + sync state, never syncs. */
@@ -148,8 +153,9 @@ export function configFileAllowed(
 		return c.appearanceData;
 	}
 	if (segs.length === 1 && extLower(rel) === "json") return c.corePluginData;
-	if (segs[0] === "plugins" && segs.length === 3 && PLUGIN_FILES.has(name)) {
-		return c.communityPluginData;
+	if (segs[0] === "plugins" && segs.length === 3) {
+		if (PLUGIN_CODE_FILES.has(name)) return c.communityPlugin;
+		if (PLUGIN_DATA_FILES.has(name)) return c.communityPluginData;
 	}
 	return false;
 }
@@ -166,8 +172,13 @@ export function descendAllowed(
 	if (segs[0] === "themes") return c.appearanceData && segs.length < 3;
 	if (segs[0] === "snippets") return c.appearanceData && segs.length < 2;
 	if (segs[0] === "plugins") {
+		// Descend when EITHER category wants something inside: the code files
+		// answer to communityPlugin, data.json to communityPluginData, and a
+		// directory walk cannot know which before it looks.
 		return (
-			c.communityPluginData && segs.length < 3 && segs[1] !== selfId
+			(c.communityPlugin || c.communityPluginData) &&
+			segs.length < 3 &&
+			segs[1] !== selfId
 		);
 	}
 	return false;

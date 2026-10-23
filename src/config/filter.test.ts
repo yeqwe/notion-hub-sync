@@ -29,7 +29,7 @@ describe("configFileAllowed", () => {
 		["snippets/a.js", false],
 		["snippets/sub/a.css", false],
 		["plugins/dataview/data.json", false], // communityPluginData off
-		["plugins/dataview/main.js", false],
+		["plugins/dataview/main.js", false], // communityPlugin off
 		["workspace.json", false],
 		["workspace-mobile.json", false],
 		["sync.json", false],
@@ -43,7 +43,7 @@ describe("configFileAllowed", () => {
 	});
 
 	it("never syncs our own plugin dir even with communityPluginData on", () => {
-		const on = cfg({ communityPluginData: true });
+		const on = cfg({ communityPluginData: true, communityPlugin: true });
 		expect(
 			configFileAllowed("plugins/notion-hub-sync/data.json", on, SELF),
 		).toBe(false);
@@ -59,6 +59,32 @@ describe("configFileAllowed", () => {
 		expect(
 			configFileAllowed("plugins/dataview/sub/data.json", on, SELF),
 		).toBe(false);
+	});
+
+	it("communityPlugin syncs the plugin itself, communityPluginData its settings", () => {
+		// The label is "Installed community plugins". A device that receives
+		// only community-plugins.json knows dataview should be enabled and has
+		// no dataview — so the code files answer to communityPlugin.
+		const code = cfg({ communityPlugin: true, communityPluginData: false });
+		expect(configFileAllowed("community-plugins.json", code, SELF)).toBe(true);
+		expect(configFileAllowed("plugins/dataview/manifest.json", code, SELF)).toBe(
+			true,
+		);
+		expect(configFileAllowed("plugins/dataview/main.js", code, SELF)).toBe(true);
+		expect(configFileAllowed("plugins/dataview/styles.css", code, SELF)).toBe(
+			true,
+		);
+		expect(configFileAllowed("plugins/dataview/data.json", code, SELF)).toBe(
+			false,
+		);
+
+		const data = cfg({ communityPlugin: false, communityPluginData: true });
+		expect(configFileAllowed("plugins/dataview/data.json", data, SELF)).toBe(
+			true,
+		);
+		expect(configFileAllowed("plugins/dataview/main.js", data, SELF)).toBe(
+			false,
+		);
 	});
 
 	it("category switches gate their files", () => {
@@ -102,11 +128,21 @@ describe("descendAllowed", () => {
 		expect(descendAllowed(dir, cfg(), SELF)).toBe(expected);
 	});
 
-	it("plugins descends only when communityPluginData on, never into self", () => {
+	it("plugins descends when either community switch is on, never into self", () => {
 		const on = cfg({ communityPluginData: true });
 		expect(descendAllowed("plugins", on, SELF)).toBe(true);
 		expect(descendAllowed("plugins/x", on, SELF)).toBe(true);
 		expect(descendAllowed("plugins/x/y", on, SELF)).toBe(false);
 		expect(descendAllowed(`plugins/${SELF}`, on, SELF)).toBe(false);
+
+		// communityPlugin alone must reach the plugin dirs too, or its
+		// manifest/main.js/styles.css are never even looked at.
+		const code = cfg({ communityPlugin: true });
+		expect(descendAllowed("plugins", code, SELF)).toBe(true);
+		expect(descendAllowed("plugins/x", code, SELF)).toBe(true);
+		expect(descendAllowed(`plugins/${SELF}`, code, SELF)).toBe(false);
+
+		const none = cfg({ communityPlugin: false, communityPluginData: false });
+		expect(descendAllowed("plugins", none, SELF)).toBe(false);
 	});
 });
