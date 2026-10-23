@@ -188,6 +188,37 @@ describe("empty folders", () => {
 		void idle;
 	});
 
+	it("a folder deleted on one device but edited on the other keeps the content", async () => {
+		const { fake, a, b } = setup();
+		mkdirSync(join(a.dir, "F"));
+		await a.sync();
+		await b.sync();
+
+		// A deletes the folder while B is still writing into it. B's change
+		// wins (it is real content), so B re-creates the page — and A must
+		// ADOPT that page. Trashing it just because A still believes the
+		// folder is gone would make B rebuild it forever.
+		rmSync(join(a.dir, "F"), { recursive: true });
+		b.write("F/keep.md", "important\n");
+		await a.sync();
+		await b.sync();
+
+		for (let i = 0; i < 6; i++) {
+			await a.sync();
+			await b.sync();
+		}
+		const ra = await a.sync();
+		const rb = await b.sync();
+		expect(ra.created + ra.updated + ra.failed).toBe(0);
+		expect(rb.created + rb.updated + rb.failed).toBe(0);
+		// the user's content survives, once, on both sides
+		expect(titled(fake, "F").length).toBe(1);
+		expect(titled(fake, "keep").length).toBe(1);
+		expect(tree(a)).toEqual(["F/", "F/keep.md"]);
+		expect(tree(b)).toEqual(["F/", "F/keep.md"]);
+		expect(b.read("F/keep.md")).toBe("important\n");
+	});
+
 	it("a folder that lost its last file stays and does not churn", async () => {
 		const { a, b } = setup();
 		a.write("F/x.md", "x\n");

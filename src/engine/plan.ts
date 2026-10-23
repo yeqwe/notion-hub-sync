@@ -245,9 +245,11 @@ export function plan(input: PlanInput): Action[] {
 	//    apart). The lowest page id wins: hex32 compares identically
 	//    everywhere and both devices can see both ids, so they agree.
 	//  • the base entry was deleted LOCALLY → the user removed this place.
-	//    The base entry is being trashed remotely this round; any page still
-	//    found here is a leftover duplicate. Pulling it back would resurrect
-	//    the folder the user just deleted — the "it keeps coming back" bug.
+	//    If the remote entry is STILL ALIVE it is a leftover duplicate and
+	//    must go (otherwise pulling it back resurrects the deleted folder).
+	//    If the remote entry is gone too, this page was created by ANOTHER
+	//    device that re-created the item — deleting it would make that
+	//    device rebuild it, and the two never converge.
 	//
 	// Neither case may fall through to createLocalFolder/pullNew.
 	const duplicatePages: string[] = [];
@@ -258,8 +260,36 @@ export function plan(input: PlanInput): Action[] {
 		if (baseId !== undefined) {
 			const le = local[baseId]!;
 			if (le.deleted) {
-				duplicatePages.push(r.id);
-			} else if (baseId < r.id) {
+				// the remote entry this device knew is being trashed this round
+				const stillRemote = remote[baseId]?.deleted !== true;
+				if (stillRemote) {
+					// leftover duplicate of a place the user just deleted
+					duplicatePages.push(r.id);
+					continue;
+				}
+				// The remote copy is gone as well: this page is the re-creation
+				// another device performed (it edited the item while this one
+				// deleted it). Both sides must agree on the outcome, and the
+				// page already exists, so ADOPT it. Trashing it here would make
+				// the other device rebuild it next round and the pair would
+				// never converge.
+				//
+				// The place comes from the base entry: the local copy is gone,
+				// so its old path is the only description of where the item
+				// used to live.
+				const baseNode = base[baseId]!;
+				addedActions.push({
+					type: "link",
+					id: r.id,
+					localPath: pathOf(
+						{ id: baseNode.parentId },
+						baseNode.name,
+					),
+					kind: baseNode.kind,
+				});
+				continue;
+			}
+			if (baseId < r.id) {
 				// keep the entry this device already has
 				duplicatePages.push(r.id);
 			} else {

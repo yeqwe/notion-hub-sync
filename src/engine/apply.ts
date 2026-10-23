@@ -553,6 +553,18 @@ function isAlreadyGone(err: unknown): boolean {
 	return /archived|in_trash|not found/i.test(message);
 }
 
+/** Parent reference for a vault path, resolved from the LOCAL directory tree
+ * (`<path>/../`). Used when an entry is (re-)created and the page parent it
+ * used to have can no longer be trusted: a re-create happens because the
+ * remote page is gone, and the page it sat under may be gone too. Creating
+ * the replacement there would put it in a trashed subtree, which the next
+ * round reads as "deleted again" and rebuilds. */
+function localParentRef(path: string): ParentRef {
+	const dir = parentDir(path);
+	if (dir === "") return { id: "root" };
+	return { newLocal: dir };
+}
+
 async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 	const { deps, report } = ctx;
 	const state = deps.state;
@@ -576,12 +588,15 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 				path: action.localPath,
 				kind,
 				notionTitle: titleFor(action.localPath, kind),
-				// resolve the real parent now: leaving it empty made the next
-				// round see a bogus move and re-issue moveRemote for an item
-				// that never moved
+				// Resolve the real parent. An empty parentId is never a valid
+				// value: the next snapshot would read it as "moved" (and, when
+				// the added page can't be found, leave the entry pointing at
+				// nothing, which re-creates the item every round). Fall back to
+				// the directory the path lives in, which the applier can always
+				// resolve.
 				parentId: added
 					? await parentIdOf(ctx, added.parent)
-					: "",
+					: await parentIdOf(ctx, localParentRef(action.localPath)),
 			};
 			e.kind = kind;
 			e.path = action.localPath;
@@ -914,14 +929,8 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 			delete state.entries[action.id];
 			await ctx.baseStore.remove(action.id);
 			if (old) {
-				const newId = await pushNew(
-					ctx,
-					old.path,
-					old.kind,
-					old.parentId === state.rootPageId
-						? { id: "root" }
-						: { id: old.parentId },
-				);
+				const parent = localParentRef(old.path);
+				const newId = await pushNew(ctx, old.path, old.kind, parent);
 				ctx.recreated.set(action.id, newId);
 				if (old.kind === "folder") {
 					ctx.localSnap.folderIdByPath.set(old.path, newId);
