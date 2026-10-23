@@ -19,7 +19,9 @@ jobs:
           node-version: "20.x"
           cache: npm
 
-      - run: npm ci
+      # 不用 npm ci：lock 文件在 Windows 生成，缺 Linux 的原生 optional deps
+      # （rolldown binding），会让 vitest 启动失败
+      - run: npm install --no-audit --no-fund
 
       - run: npm test
 
