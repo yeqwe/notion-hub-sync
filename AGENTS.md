@@ -2,6 +2,20 @@
 
 Obsidian plugin: whole-vault multi-device sync through Notion (page tree as the hub). TypeScript strict, esbuild bundle, Vitest tests. Desktop + mobile (`isDesktopOnly: false`) — **no Node/Electron APIs in `src/`** (no `require`, `fs`, `path`, `Buffer`, `process`).
 
+## 本机用户环境（排查现场问题必看）
+
+真实使用的 vault 和远端（只在需要读日志、复现现象时用，**不要写进测试**）：
+
+- vault：`D:\PortableApps\PortableApps\ObsidianPortable\Data\Obisidan`
+- 插件目录：`…\.obsidian\plugins\notion-hub-sync`
+  - `sync-log.json` — 同步面板日志，排查「卡死 / 循环 / 反复同步」的第一手材料
+  - `sync-state.json` — 同步状态（2965 条目时约 2 MB；`entries` 是 merge base）
+  - `data.json` — 插件设置
+- Notion 根页面：`https://app.notion.com/p/obsidian-4016267115568043a96bff36b3f3d90a`
+
+读这两个 JSON 必须用显式 UTF-8：`[System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($p))`。
+PowerShell 默认编码会把它们读成乱码，`ConvertFrom-Json` 直接抛错。
+
 ## Commands
 
 - `npm test` — unit + offline tests (Vitest, `src/**/*.test.ts`)

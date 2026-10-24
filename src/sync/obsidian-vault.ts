@@ -29,7 +29,7 @@ export class ObsidianVaultIO implements VaultIO {
 				files.push({
 					path: tf.path,
 					size: tf.stat.size,
-					mtime: tf.stat.mtime,
+					mtime: Math.round(tf.stat.mtime),
 				});
 			} else {
 				const dir = (f as TFolder).path;
@@ -243,7 +243,10 @@ export class ObsidianVaultIO implements VaultIO {
 	async stat(path: string): Promise<{ size: number; mtime: number } | null> {
 		const f = this.app.vault.getAbstractFileByPath(path) as TFile | null;
 		if (!f || f.extension === undefined) return null;
-		return { size: f.stat.size, mtime: f.stat.mtime };
+		// Rounded for the same reason as `config/config-io.ts`: the adapter
+		// reports fractional mtimes on Windows, `TFile.stat.mtime` is
+		// integral, and the base stores whichever one it was written with.
+		return { size: f.stat.size, mtime: Math.round(f.stat.mtime) };
 	}
 
 	readonly renames = new RenameTracker();

@@ -11,6 +11,7 @@ import { findReservedPage, ensureReservedPage } from "../sync/reserved";
 import type { SyncState } from "../sync/state";
 import type { SyncDeps } from "../sync/deps";
 import type { JournalOp } from "../engine/journal";
+import { sameStat } from "../engine/local";
 import type { ConfigIO } from "./config-io";
 import {
 	anyConfigEnabled,
@@ -254,6 +255,15 @@ export async function syncConfig(
 	// update always moves mtime or size.
 	const statIsEnough = (rel: string): boolean =>
 		!rel.toLowerCase().endsWith(".json");
+	/** The mtime to STORE. Rounded, because the value can come from either
+	 * `adapter.stat()` (fractional on Windows) or `TFile.stat` (integral),
+	 * and a base written with the fractional form is what made every round
+	 * re-read the file. Rounding on the way in keeps new records clean;
+	 * `sameStat` keeps OLD records working. */
+	const statMtime = (
+		st: { mtime: number } | null | undefined,
+	): number | undefined =>
+		st == null ? undefined : Math.round(st.mtime);
 	const local: Record<string, { exists: true; sha: string }> = {};
 	const statOf = new Map<string, { size: number; mtime: number }>();
 	const walk = async (dir: string): Promise<void> => {
@@ -269,7 +279,7 @@ export async function syncConfig(
 				base &&
 				base.sha &&
 				statIsEnough(rel) &&
-				base.localMtime === st.mtime &&
+				sameStat(base.localMtime, st.mtime) &&
 				base.localSize === st.size
 			) {
 				local[rel] = { exists: true, sha: base.sha };
@@ -289,7 +299,7 @@ export async function syncConfig(
 			// REAL change would make the next round reuse the old base sha and
 			// silently hide the edit.
 			if (base && base.sha === sha) {
-				base.localMtime = st.mtime;
+				base.localMtime = statMtime(st);
 				base.localSize = st.size;
 			}
 		}
@@ -460,7 +470,7 @@ export async function syncConfig(
 		state.config![rel] = {
 			pageId,
 			sha: await contentSha(rel, bytes),
-			localMtime: st?.mtime,
+			localMtime: statMtime(st),
 			localSize: st?.size,
 			mediaBlockId: remoteBlock.get(rel) ?? undefined,
 		};
@@ -493,7 +503,7 @@ export async function syncConfig(
 						pageId,
 						sha: await contentSha(a.rel, bytes),
 						mediaBlockId: blockId ?? undefined,
-						localMtime: st?.mtime,
+						localMtime: statMtime(st),
 						localSize: st?.size,
 					};
 					out.journalOps.push({ o: "n", id: pageId });
@@ -513,7 +523,7 @@ export async function syncConfig(
 					b.sha = await contentSha(a.rel, bytes);
 					b.mediaBlockId = blockId ?? undefined;
 					const st = await io.stat(a.rel);
-					b.localMtime = st?.mtime;
+					b.localMtime = statMtime(st);
 					b.localSize = st?.size;
 					out.journalOps.push({ o: "c", id: a.pageId, s: b.sha });
 					break;
@@ -551,7 +561,7 @@ export async function syncConfig(
 						pageId: a.pageId,
 						sha: (remote[a.rel] as { sha: string }).sha,
 						mediaBlockId: remoteBlock.get(a.rel) ?? undefined,
-						localMtime: st?.mtime,
+						localMtime: statMtime(st),
 						localSize: st?.size,
 					};
 					out.localWritten = true;
@@ -577,7 +587,7 @@ export async function syncConfig(
 						const b = state.config[a.rel];
 						if (b) {
 							const st = statOf.get(a.rel);
-							b.localMtime = st?.mtime;
+							b.localMtime = statMtime(st);
 							b.localSize = st?.size;
 							b.pageId = r.pageId;
 							b.mediaBlockId =

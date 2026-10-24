@@ -420,6 +420,12 @@ export async function snapshotRemote(
 		candidates.size + auditAdds.length - rrOnly.size,
 	);
 	let evalDone = 0;
+	// A full round on a large vault evaluates thousands of pages, and the
+	// panel bar alone does not say whether it is progressing or wedged —
+	// the user sees "获取 Notion 端变更…" for half an hour. One log line per
+	// 100 evaluations is a handful of lines per round and answers "is it
+	// alive" without burying the milestones.
+	let lastEvalLog = 0;
 	/** Report progress for real changes only. Round-robin candidates are a
 	 * silent correctness backstop: when the user changed nothing, nothing
 	 * should appear to be happening — a "6/10" readout on an idle round
@@ -427,6 +433,10 @@ export async function snapshotRemote(
 	const evalTick = (id: string, label: string): void => {
 		if (rrOnly.has(id)) return; // spot check — never counted or shown
 		evalDone++;
+		if (evalTotal > 0 && evalDone - lastEvalLog >= 100) {
+			lastEvalLog = evalDone;
+			deps.log?.(`evaluate: ${evalDone}/${evalTotal}`);
+		}
 		// nothing real to report (spot-check-only round) → stay silent
 		if (evalTotal === 0) return;
 		deps.event?.({

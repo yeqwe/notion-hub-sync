@@ -16,6 +16,24 @@ import type { BlockedPath } from "../sync/blocked";
 import type { Scope } from "../sync/scope";
 import type { LocalAdded, ParentRef, Side } from "./types";
 
+/** Do two mtimes name the same instant?
+ *
+ * A base written by an older version (or by the adapter path, which reports
+ * fractional milliseconds on Windows) can carry `1792825000490.75` while the
+ * vault listing reports `1792825000491`. Plain `===` then never matches, the
+ * sha is recomputed from disk on EVERY round, and the file is re-uploaded
+ * whenever the remote side was not evaluated. Compare rounded values so a
+ * value stored either way keeps working; rounding at the source
+ * (`sync/obsidian-vault.ts`, `config/config-io.ts`) keeps NEW writes exact.
+ */
+export function sameStat(
+	base: number | undefined,
+	current: number | undefined,
+): boolean {
+	if (base === undefined || current === undefined) return false;
+	return Math.round(base) === Math.round(current);
+}
+
 export interface LocalSnapshot {
 	/** id → evaluated side (only evaluated ids present). */
 	local: Record<string, Side>;
@@ -266,7 +284,7 @@ export async function snapshotLocal(
 		e.lastSeenAt = Date.now();
 		const baseSha = e.srcSha ?? e.localHash ?? e.fileSha ?? null;
 		const reuse =
-			e.localMtime === f.mtime &&
+			sameStat(e.localMtime, f.mtime) &&
 			e.localSize === f.size &&
 			baseSha !== null;
 		if (reuse) {

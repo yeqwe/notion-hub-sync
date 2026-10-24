@@ -48,6 +48,16 @@ import { summarizeBlocked } from "./sync/blocked";
 import { blockedLabels } from "./i18n";
 import { scanPendingChanges, type PendingChange } from "./sync/changes";
 
+/** Vault size at which "full sync" asks before starting.
+ *
+ * A full round compares EVERY file's content — one download each, so the
+ * cost is ~2 requests per entry. Below this many entries the round finishes
+ * in a couple of minutes and the prompt would be noise; above it, it is the
+ * difference between "wait a bit" and "watch the app look frozen for half
+ * an hour". 200 entries ≈ 400 requests ≈ 2 min at Notion's 3 req/s.
+ */
+const FULL_SYNC_CONFIRM_ENTRIES = 200;
+
 export default class NotionHubSyncPlugin extends Plugin {
 	settings: NotionHubSettings = { ...DEFAULT_SETTINGS };
 	private statusEl: HTMLElement | null = null;
@@ -823,6 +833,23 @@ export default class NotionHubSyncPlugin extends Plugin {
 		const strings = getStrings();
 		if (!(await this.syncDeps())) {
 			return; // missing config — syncDeps already Noticed
+		}
+		// A "full" round lifts the content spot-check budget and compares
+		// EVERY file. On a large vault that is one download per file: 2965
+		// entries ≈ 5900 requests ≈ 33 minutes at Notion's 3 req/s, which is
+		// how "full sync" turns into "the app is frozen and then the network
+		// dies". Say the cost out loud before spending it.
+		if (full && this.state) {
+			const n = Object.keys(this.state.entries).length;
+			if (n >= FULL_SYNC_CONFIRM_ENTRIES) {
+				const minutes = Math.ceil((n * 2) / 3 / 60);
+				const ok = await confirmAction(this.app, {
+					title: strings.fullSyncConfirmTitle,
+					text: strings.fullSyncConfirmText(n, minutes),
+					warning: true,
+				});
+				if (!ok) return;
+			}
 		}
 		this.nextTrigger = full ? "full" : "manual";
 		this.setSyncing(true);

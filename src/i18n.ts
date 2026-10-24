@@ -20,6 +20,9 @@ export interface I18nStrings {
 	commandTestConnection: string;
 	commandSyncNow: string;
 	commandFullSync: string;
+	/** Shown before a full round on a large vault (costs ~2 requests/file). */
+	fullSyncConfirmTitle: string;
+	fullSyncConfirmText: (entries: number, minutes: number) => string;
 	syncStarted: string;
 	syncDoneAt(time: string): string;
 	syncProgress(done: number, total: number): string;
@@ -286,6 +289,9 @@ const EN_STRINGS: I18nStrings = {
 	commandTestConnection: "Test connection",
 	commandSyncNow: "Sync now",
 	commandFullSync: "Full sync (check everything)",
+	fullSyncConfirmTitle: "Check every file?",
+	fullSyncConfirmText: (entries, minutes) =>
+		`This vault has ${entries} synced items. A full sync downloads and compares the content of every one of them — roughly ${entries * 2} Notion requests, about ${minutes} minutes at the API's rate limit.\n\nNothing is wrong with your vault; a normal \"Sync now\" already checks the whole tree structure and samples file contents. Use this only when you believe something was missed.`,
 	syncStarted: "Syncing...",
 	syncDoneAt: (time) => `NHS ✓ ${time}`,
 	syncProgress: (done, total) => `${done}/${total}`,
@@ -643,6 +649,9 @@ const ZH_CN_STRINGS: I18nStrings = {
 	commandTestConnection: "测试连接",
 	commandSyncNow: "立即同步",
 	commandFullSync: "完整同步（检查全部）",
+	fullSyncConfirmTitle: "要检查每一个文件吗？",
+	fullSyncConfirmText: (entries, minutes) =>
+		`这个库有 ${entries} 个已同步条目。完整同步会把每一个文件的内容都下载下来比对——大约 ${entries * 2} 个 Notion 请求，按接口限速约需 ${minutes} 分钟。\n\n你的库没有问题；普通的「立即同步」已经会扫描整个结构并抽样比对内容。只有在你确信有东西被漏掉时才需要这个。`,
 	syncStarted: "正在同步...",
 	syncDoneAt: (time) => `NHS ✓ ${time}`,
 	syncProgress: (done, total) => `${done}/${total}`,

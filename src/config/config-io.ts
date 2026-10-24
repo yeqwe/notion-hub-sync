@@ -25,8 +25,28 @@ interface AdapterLike {
 	trashLocal?: (path: string) => Promise<void>;
 }
 
-export class ObsidianConfigIO implements ConfigIO {
-	private readonly adapter: AdapterLike;
+/** Round an adapter stat into the shape the base stores.
+ *
+ * Obsidian's `adapter.stat()` returns a FRACTIONAL mtime on Windows
+ * (`1792825000490.75`), while `TFile.stat.mtime` — what the vault listing
+ * and the note-tree scanner use — is integral. Storing the fractional
+ * value and comparing it with `===` against a later read never matches,
+ * so every round re-read that file as "changed". That is invisible on a
+ * 700-byte JSON file and very visible on a 4 MB `main.js`.
+ *
+ * Rounding once, at the boundary where the number enters the system, is
+ * the only place the two sources can be made to agree.
+ *
+ * Exported because the Obsidian vault IO needs the same rule.
+ */
+export function normalizeStat(
+	st: { size: number; mtime: number } | null,
+): { size: number; mtime: number } | null {
+	if (!st) return null;
+	return { size: st.size, mtime: Math.round(st.mtime) };
+}
+
+export class ObsidianConfigIO implements ConfigIO {	private readonly adapter: AdapterLike;
 
 	constructor(
 		app: App,
@@ -55,7 +75,7 @@ export class ObsidianConfigIO implements ConfigIO {
 	}
 
 	stat(path: string) {
-		return this.adapter.stat(this.abs(path));
+		return this.adapter.stat(this.abs(path)).then(normalizeStat);
 	}
 
 	readBinary(path: string) {
