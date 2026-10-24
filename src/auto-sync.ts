@@ -237,7 +237,15 @@ export function wireAutoSync(
 				return;
 			if (busy()) return;
 			const last = lastRoundEnd(hooks.getState());
-			if (last === undefined || now() - last <= 60_000) return;
+			if (last === undefined) return;
+			// Coming back to the app is not a reason to sync when a round ran
+			// recently: on a phone `visibilitychange` fires on every app switch,
+			// lock/unlock and tab return, so a fixed 60 s gate produced dozens
+			// of rounds a day. Honour the user's interval instead — it already
+			// expresses "how often may this talk to Notion".
+			const intervalMin = hooks.getSettings().autoSyncIntervalMinutes;
+			const gateMin = intervalMin > 0 ? intervalMin : 10;
+			if (now() - last <= gateMin * 60_000) return;
 			fire();
 		});
 	}

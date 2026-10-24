@@ -47,33 +47,31 @@ describe("a content edit survives a full audit", () => {
 		fake.humanEdit(id, "# n05\nHUMAN EDIT\n");
 		fake.now += 600_000;
 
-		// Full sync: the audit sees the structure is unchanged and does not
-		// pull content itself (round-robin is off) — so nothing is updated.
+		// Full sync compares EVERY file's content (the one thing it still does
+		// that "sync now" does not), so the edit is pulled right here — with
+		// round-robin off, which is the configuration where nothing else would
+		// have found it.
 		const rFull = await a.sync(true);
-		expect(a.read("n05.md")).not.toContain("HUMAN EDIT");
-		expect(rFull.updated).toBe(0);
+		expect(a.read("n05.md")).toContain("HUMAN EDIT");
+		expect(rFull.updated).toBe(1);
 
-		// The audit must NOT have marked the page as evaluated.
-		const stampedAt = a.state.entries[id]!.remoteEdited;
+		// The entry is now marked as evaluated, so the next round is idle.
 		const pageTs = new Date(fake.pages.get(id)!.lastEdited).toISOString();
-		expect(stampedAt).not.toBe(pageTs);
+		expect(a.state.entries[id]!.remoteEdited).toBe(pageTs);
 
-		// The next incremental round detects the edit through /search.
 		fake.now += 600_000;
 		const rInc = await a.sync();
-		expect(rInc.updated).toBe(1);
+		expect(rInc.updated).toBe(0);
 		expect(a.read("n05.md")).toContain("HUMAN EDIT");
 	});
 
-	it("edit -> FULL sync -> incremental pulls it even with RR=0", async () => {
+	it("edit -> incremental sync with RR=0 still catches it via the scan", async () => {
 		const { fake, a } = setup(8, 0);
 		await a.sync();
 		await a.sync();
-		const id = idOf(a, "n00.md");
 
+		const id = idOf(a, "n00.md");
 		fake.humanEdit(id, "# n00\nEDITED\n");
-		fake.now += 600_000;
-		await a.sync(true); // audit
 		fake.now += 600_000;
 
 		const counts = [] as number[];

@@ -231,6 +231,10 @@ export interface SearchAudit {
 	adds: Node[];
 	/** every entry id verified still in the tree this round. */
 	seenIds: Set<string>;
+	/** ids whose `last_edited_time` moved since content was last compared.
+	 * The scan already sees this stamp for every page, so it can drive the
+	 * content comparison without a second `/search` pass. */
+	contentCandidates: Set<string>;
 	/** metadata the scan already paid for, keyed by hex id —lets the
 	 * evaluate phase skip its own GET /pages for these ids. */
 	pages: Map<string, PageInfo>;
@@ -466,6 +470,8 @@ export async function auditSearchScan(
 	// ---- diff against the merge base ----
 	const adds: Node[] = [];
 	const seenIds = new Set<string>();
+	/** entries whose remote content stamp moved (see the structure loop). */
+	const contentCandidates = new Set<string>();
 	const orphans: string[] = [];
 	for (const i of usable) {
 		const id = hex(i.id);
@@ -514,6 +520,19 @@ export async function auditSearchScan(
 				sha: entrySha(entry),
 			};
 			fetchedMeta.set(id, { title: i.title });
+			continue;
+		}
+		// Structure unchanged — but CONTENT may have changed, and this scan is
+		// the only place that sees `last_edited_time` for every page. Report a
+		// moved stamp as a content candidate here instead of paging through
+		// `/search` a second time with the incremental pass: same endpoint, same
+		// data, one request budget. (Probed: an idle 500-page round fired
+		// `POST /search` 11 times, 10 of them this duplicate.)
+		//
+		// A page edited on another device without bumping the stamp still needs
+		// the round-robin sample — that is a different mechanism and stays.
+		if (i.lastEdited !== undefined && entry.remoteEdited !== i.lastEdited) {
+			contentCandidates.add(id);
 		}
 	}
 
@@ -578,5 +597,10 @@ export async function auditSearchScan(
 		}
 	}
 
-	return { adds, seenIds, pages: new Map(usable.map((i) => [hex(i.id), i])) };
+	return {
+		adds,
+		seenIds,
+		contentCandidates,
+		pages: new Map(usable.map((i) => [hex(i.id), i])),
+	};
 }

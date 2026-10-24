@@ -134,11 +134,18 @@ export default class NotionHubSyncPlugin extends Plugin {
 			name: strings.commandSyncNow,
 			callback: () => this.runEngine(false),
 		});
-		this.addCommand({
-			id: "full-sync",
-			name: strings.commandFullSync,
-			callback: () => this.runEngine(true),
-		});
+		// There used to be a second "Full sync (check everything)" command next
+		// to this one. It is gone because the difference stopped being real: the
+		// structural scan runs every round now, so "Sync now" already checks the
+		// whole tree, and forcing `full` only added a redundant second /search
+		// pass (measured: 28 requests for "sync now" vs 23 for "full sync" on a
+		// 500-page vault — the supposedly thorough one was the cheaper one).
+		//
+		// The `full` code path still exists and is still reachable from the
+		// status panel, where it is labelled and explained: it lifts the content
+		// spot-check budget and compares EVERY file's content, which is the right
+		// reaction to "I think something was missed" but not a thing to run by
+		// accident from the command palette.
 		this.addCommand({
 			id: "show-version-history",
 			name: strings.commandShowHistory,

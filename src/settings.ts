@@ -77,9 +77,14 @@ export const DEFAULT_SETTINGS: NotionHubSettings = {
 	autoSync: true,
 	paused: false,
 	autoSyncDebounceSeconds: 10,
-	autoSyncIntervalMinutes: 5,
+	autoSyncIntervalMinutes: 10,
 	syncOnStartup: true,
-	syncOnForeground: true,
+	/** Foreground sync is OFF by default: on a phone this fires on every app
+	 * switch, screen unlock and tab return — dozens of rounds a day, each one
+	 * a handful of Notion requests. The 10-minute interval already covers "I
+	 * came back to work", and the ribbon button is one tap away. Turn it on
+	 * if you want an immediate round on unlock. */
+	syncOnForeground: false,
 	maxFileSizeMB: 200,
 	deleteGuardThreshold: 10,
 	debugLog: false,

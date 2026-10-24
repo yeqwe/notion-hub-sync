@@ -151,9 +151,18 @@ export async function snapshotRemote(
 	}
 
 	// ---- search (best-effort human edits) ----
-	// No cursor yet + audit due → the tree walk finds everything anyway;
-	// skip the search (every hit would cost 1–3 parentInTree GETs).
-	if (!opts.full && !(state.searchCursor === undefined && auditDue)) {
+	// SKIPPED when the structural scan will run: that scan pages through the
+	// SAME endpoint for the SAME metadata and then feeds `contentCandidates`
+	// from it (see remote-audit). Running both spent two requests on one
+	// answer — an idle 500-page round fired `POST /search` 11 times, 10 of them
+	// this duplicate. The incremental pass survives for the configuration that
+	// turns the scan off (`scanStructureEveryRound=false`), where it is the
+	// only thing watching for human edits.
+	if (
+		!opts.full &&
+		!scanStructure &&
+		!(state.searchCursor === undefined && auditDue)
+	) {
 		const since = state.searchCursor
 			? Date.parse(state.searchCursor) - SEARCH_CURSOR_GRACE_MS
 			: -Infinity;
@@ -248,7 +257,17 @@ export async function snapshotRemote(
 		const rr = Object.entries(state.entries)
 			.filter(([, e]) => e.kind !== "folder")
 			.sort((a, b) => score(a[1]) - score(b[1]))
-			.slice(0, opts.roundRobinPerRound);
+			// `full` means "check everything", so the budget is lifted: every file
+			// gets its content compared. That is the ONE thing the two sync
+			// commands still differ in (the structural scan runs either way), and
+			// it costs roughly one download per file — which is why this is
+			// reachable only from the status panel, not the command palette.
+			.slice(
+				0,
+				opts.full
+					? undefined
+					: opts.roundRobinPerRound,
+			);
 		for (const [id] of rr) {
 			if (!candidates.has(id)) rrOnly.add(id);
 			candidates.add(id);
@@ -293,9 +312,14 @@ export async function snapshotRemote(
 			auditAdds.push(...scanned.adds);
 			seenIds = scanned.seenIds;
 			auditPages = scanned.pages;
+			// The scan saw every page's `last_edited_time`; a moved stamp means
+			// the content needs comparing. This replaces the second `/search`
+			// pass the incremental search used to run for the same information.
+			for (const id of scanned.contentCandidates) candidates.add(id);
 			nestedUnderPage = childPagesUnderNotes(state, scanned.pages);
 			deps.debug?.(
-				`audit: search ${seenIds.size} in-tree, ${scanned.adds.length} new`,
+				`audit: search ${seenIds.size} in-tree, ${scanned.adds.length} new, ` +
+					`${scanned.contentCandidates.size} content candidate(s)`,
 			);
 		} else {
 			const nodes: Node[] = [];

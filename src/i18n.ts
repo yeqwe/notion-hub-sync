@@ -374,13 +374,13 @@ const EN_STRINGS: I18nStrings = {
 		"Wait this long after the last vault change before syncing.",
 	settingsAutoSyncInterval: "Sync interval",
 	settingsAutoSyncIntervalDescription:
-		"Periodic sync interval. 0 disables interval sync.",
+		"Periodic sync interval, in minutes. 0 disables interval sync. Each round costs a handful of Notion requests even when nothing changed, so keep this comfortably above how often you actually edit.",
 	settingsSyncOnStartup: "Sync on startup",
 	settingsSyncOnStartupDescription:
 		"Run a sync shortly after Obsidian starts.",
 	settingsSyncOnForeground: "Sync on foreground",
 	settingsSyncOnForegroundDescription:
-		"Sync when the app becomes visible again (mobile foreground).",
+		"Sync when the app becomes visible again. On a phone this fires on every app switch and screen unlock, so it is off by default; when on, it never runs more often than the sync interval above.",
 	settingsMaxFileSize: "Max file size",
 	settingsMaxFileSizeDescription:
 		"Files larger than this are skipped and reported as blocked.",
@@ -725,11 +725,13 @@ const ZH_CN_STRINGS: I18nStrings = {
 	settingsAutoSyncDebounce: "变更防抖",
 	settingsAutoSyncDebounceDescription: "最后一次文件变更后等待这么久再同步。",
 	settingsAutoSyncInterval: "同步间隔",
-	settingsAutoSyncIntervalDescription: "定时同步间隔，0 表示关闭。",
+	settingsAutoSyncIntervalDescription:
+		"定时同步间隔（分钟），0 表示关闭。即使什么都没改，每轮也要花几个 Notion 请求，建议设得比实际编辑频率宽裕些。",
 	settingsSyncOnStartup: "启动时同步",
 	settingsSyncOnStartupDescription: "Obsidian 启动后不久运行一次同步。",
 	settingsSyncOnForeground: "回到前台时同步",
-	settingsSyncOnForegroundDescription: "应用重新可见时同步（移动端前台）。",
+	settingsSyncOnForegroundDescription:
+		"应用重新可见时同步。手机上每次切应用、解锁都会触发，所以默认关闭；打开后也不会高于上面的同步间隔。",
 	settingsMaxFileSize: "最大文件大小",
 	settingsMaxFileSizeDescription: "超过此大小的文件将被跳过并标记为受阻。",
 	commandShowStatus: "显示同步状态",
