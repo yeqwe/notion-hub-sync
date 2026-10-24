@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	loadStateChecked,
+	ObsidianVaultIO,
 	quarantineState,
 	saveState,
 } from "./obsidian-vault";
@@ -119,5 +120,37 @@ describe("quarantineState", () => {
 		expect(fmt(dir).exists(`plugins/nhs/${STATE_FILE}`)).toBe(false);
 		const r = await loadStateChecked(app, "", ROOT);
 		expect(r.problem).toBeUndefined();
+	});
+});
+
+describe("ObsidianVaultIO.exists", () => {
+	// local.ts asks this to distinguish "user deleted the file" from "the
+	// vault index just has not seen it yet". Checking only the index makes
+	// the second case look like a deletion and trashes the Notion page.
+	function indexApp(dir: string, indexed: Set<string>): App {
+		const abs = (p: string) => join(dir, ...p.split("/").filter(Boolean));
+		return {
+			vault: {
+				getAbstractFileByPath: (p: string) =>
+					indexed.has(p) ? { path: p } : null,
+				adapter: {
+					exists: async (p: string) => existsSync(abs(p)),
+				},
+			},
+		} as unknown as App;
+	}
+
+	it("is true when the index missed a file that is on disk", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "nhs-ex-"));
+		writeFileSync(join(dir, "note.md"), "hi");
+		const io = new ObsidianVaultIO(indexApp(dir, new Set()));
+		expect(await io.exists("note.md")).toBe(true);
+	});
+
+	it("is true from the index alone, false when neither has it", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "nhs-ex-"));
+		const io = new ObsidianVaultIO(indexApp(dir, new Set(["a.md"])));
+		expect(await io.exists("a.md")).toBe(true);
+		expect(await io.exists("b.md")).toBe(false);
 	});
 });

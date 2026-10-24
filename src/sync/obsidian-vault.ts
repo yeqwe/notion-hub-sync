@@ -167,7 +167,14 @@ export class ObsidianVaultIO implements VaultIO {
 	}
 
 	async exists(path: string): Promise<boolean> {
-		return this.app.vault.getAbstractFileByPath(path) !== null;
+		// The in-memory index is not the filesystem: on mobile it fills in
+		// asynchronously and can miss a file that is right there on disk.
+		// local.ts relies on this to tell "user deleted it" apart from "the
+		// listing lied", so ask the adapter too before answering false.
+		return (
+			this.app.vault.getAbstractFileByPath(path) !== null ||
+			(await this.app.vault.adapter.exists(path))
+		);
 	}
 
 	async stat(path: string): Promise<{ size: number; mtime: number } | null> {

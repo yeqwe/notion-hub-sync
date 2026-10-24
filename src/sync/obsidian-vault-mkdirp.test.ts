@@ -27,6 +27,9 @@ function fakeApp(initial: string[] = []) {
 				folders.add(p);
 				created.push(p);
 			}),
+			adapter: {
+				exists: async (p: string) => folders.has(p),
+			},
 		},
 	};
 	return {
