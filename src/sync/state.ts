@@ -82,6 +82,15 @@ export interface SyncState {
 	>;
 	/** ms epoch of last config-dir scan (mobile throttling). */
 	lastConfigScan?: number;
+	/** ms epoch of the last FULL structural audit of the ⚙️ config tree.
+	 *
+	 * Between two audits the config base alone answers "is this page still
+	 * there" — the planner reads an entry absent from the remote map as
+	 * "not evaluated this round = unchanged". Re-listing the whole config
+	 * tree every round cost 2 requests per config file (one GET /pages plus
+	 * one GET children) on rounds where nothing had changed, which is what
+	 * made an idle sync look like it was "syncing the plugins forever". */
+	lastConfigAudit?: number;
 	/** Journal block ids already consumed (newest first, capped at 50). */
 	journalSeen?: string[];
 	/** Search high-water mark: max last_edited_time seen (ISO). */

@@ -35,6 +35,11 @@ export interface EngineSettings {
 	/** Scan the whole remote structure each round (default true). Off falls
 	 * back to journal + search index, which can miss deletions. */
 	scanStructureEveryRound?: boolean;
+	/** Hours between two FULL audits of the ⚙️ config tree. Absent → the
+	 * engine's own default. Kept separate from `fullAuditHours` because the
+	 * config tree is ours (stable ids in the base) while the note tree needs
+	 * every-round scanning to notice a page deleted in the Notion UI. */
+	configAuditHours?: number;
 }
 
 export interface EngineDeps extends SyncDeps {
@@ -461,11 +466,19 @@ export async function runSync(
 					deviceId: deps.deviceId,
 					isMobile: deps.isMobile ?? false,
 					now: () => deps.now?.() ?? Date.now(),
+					auditHours: deps.engine.configAuditHours,
 					log: deps.log,
 					debug: deps.debug,
 				},
 				{
-					full: opts.full || remoteSnap.auditDue,
+					// NOT `|| remoteSnap.auditDue`. That value is the NOTE tree's
+					// every-round structural scan and is true on every round while
+					// `scanStructureEveryRound` is on (the default). Passing it here
+					// made the config pass re-enumerate the whole ⚙️ tree every
+					// round: 2 requests per config file, forever, for a directory
+					// nobody had touched. The config tree runs on its own clock
+					// (`state.lastConfigAudit`) — see `syncConfig`.
+					full: opts.full,
 					journalCandidateIds: new Set(
 						remoteSnap.journalCandidateIds,
 					),

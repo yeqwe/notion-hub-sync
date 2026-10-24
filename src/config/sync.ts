@@ -25,6 +25,14 @@ export const CONFIG_ROOT_TITLE = "⚙️ Obsidian 设置 (notion-hub-sync)";
 export const CONFIG_ROOT_ICON = "⚙️";
 const MOBILE_SCAN_MIN_MS = 10 * 60_000;
 
+/** How long the config base is trusted as "the remote tree still looks like
+ * this". Two hours: a config page deleted by hand in Notion surfaces within
+ * that window, and in exchange an idle round spends ZERO requests on the
+ * config tree. Anything pushed through the journal (another device's edit or
+ * deletion) is still applied immediately — this only gates the full
+ * re-enumeration. */
+export const DEFAULT_CONFIG_AUDIT_HOURS = 2;
+
 export interface ConfigSyncDeps {
 	client: NotionClient;
 	state: SyncState;
@@ -35,6 +43,9 @@ export interface ConfigSyncDeps {
 	deviceId: string;
 	isMobile: boolean;
 	now: () => number;
+	/** Hours between two FULL structural audits of the ⚙️ config tree.
+	 * Defaults to {@link DEFAULT_CONFIG_AUDIT_HOURS}. */
+	auditHours?: number;
 	log?: (msg: string) => void;
 	/** per-file detail (each config file hashed/pushed); absent → silent. */
 	debug?: (msg: string) => void;
@@ -227,6 +238,22 @@ export async function syncConfig(
 	state.config = state.config ?? {};
 
 	// ---- local scan ----
+	// mtime+size decides "unchanged" whenever the base already recorded a sha
+	// for the same stat. Reading every config file each round was the single
+	// most expensive part of an idle round: 5 installed plugins = 15 file
+	// reads (~1.5 MB) every few minutes, for files that cannot have changed.
+	//
+	// JSON is deliberately EXEMPT. Two edits landing in the same mtime tick
+	// with the same byte count (`"baseFontSize":16` → `17`) are
+	// indistinguishable by stat, and JSON settings are exactly where that
+	// happens — a value nudged by one digit. They are also the files Obsidian
+	// re-serialises on start and the ones whose semantic sha (see contentSha)
+	// already absorbs formatting drift. There are a handful of them and they
+	// are tiny, so reading them is cheap; the megabytes live in `main.js`,
+	// `styles.css` and `theme.css`, which do take the stat path — a plugin
+	// update always moves mtime or size.
+	const statIsEnough = (rel: string): boolean =>
+		!rel.toLowerCase().endsWith(".json");
 	const local: Record<string, { exists: true; sha: string }> = {};
 	const statOf = new Map<string, { size: number; mtime: number }>();
 	const walk = async (dir: string): Promise<void> => {
@@ -237,17 +264,34 @@ export async function syncConfig(
 			const st = await io.stat(rel);
 			if (!st) continue;
 			statOf.set(rel, st);
-			// Always re-hash the bytes. An mtime+size short-circuit looks free
-			// but is wrong in the exact case that matters here: an edit that
-			// keeps the byte count identical and lands in the same mtime tick
-			// (iOS reports a coarse mtime) is invisible, so a real setting
-			// change is never pushed. Config files are few and small 鈥?local
-			// IO, not requests 鈥?so reading them is the cheap part.
+			const base = state.config![rel];
+			if (
+				base &&
+				base.sha &&
+				statIsEnough(rel) &&
+				base.localMtime === st.mtime &&
+				base.localSize === st.size
+			) {
+				local[rel] = { exists: true, sha: base.sha };
+				continue;
+			}
 			const sha = await contentSha(
 				rel,
 				new Uint8Array(await io.readBinary(rel)),
 			);
 			local[rel] = { exists: true, sha };
+			// The stat moved but the CONTENT did not (a `touch`, or Obsidian
+			// re-serialising a JSON file on start). Record the new stat on the
+			// base so the next round takes the cheap path instead of reading
+			// this file again — every round, forever.
+			//
+			// Only when the hash agrees with the base: writing the stat for a
+			// REAL change would make the next round reuse the old base sha and
+			// silently hide the edit.
+			if (base && base.sha === sha) {
+				base.localMtime = st.mtime;
+				base.localSize = st.size;
+			}
 		}
 		for (const name of listing.folders) {
 			const rel = dir === "" ? name : `${dir}/${name}`;
@@ -266,19 +310,45 @@ export async function syncConfig(
 	> = {};
 	const remoteBytes = new Map<string, Uint8Array>();
 	const remoteBlock = new Map<string, string | null>();
+	// A FULL re-enumeration of the ⚙️ tree is on its own clock.
+	//
+	// It used to ride on `opts.full`, which `runSync` computed as
+	// `opts.full || remoteSnap.auditDue` — and `auditDue` is true on every
+	// round while `scanStructureEveryRound` is on (the default). That is the
+	// right policy for the NOTE tree (a page deleted in the Notion UI must
+	// be noticed) and the wrong one here: a config page is created by us,
+	// carries a stable id in `state.config`, and costs 2 requests per file
+	// to re-discover — 30 requests on every idle round for five installed
+	// plugins, which is what made "sync" look like it never stopped
+	// touching them.
+	//
+	// Between audits the base is authoritative for existence: the planner
+	// reads an entry absent from `remote` as "not evaluated = unchanged",
+	// and journal candidates (another device's edit/deletion) are still
+	// evaluated immediately below.
+	const auditHours = deps.auditHours ?? DEFAULT_CONFIG_AUDIT_HOURS;
+	const auditDue =
+		opts.full ||
+		state.configRootId === undefined ||
+		state.lastConfigAudit === undefined ||
+		now - state.lastConfigAudit > auditHours * 3_600_000;
 	// findConfigRoot lists root children when configRootId is unknown —
 	// skip it entirely on rounds where nothing could reference config
 	// (no base entries, no local files, no journal candidates, no audit).
+	//
+	// `auditDue` has to be part of this: a device that has never synced
+	// config has an empty base AND an empty local listing, so without the
+	// audit flag it would never go looking and would never see the pages
+	// another device already pushed.
 	const needsRemote =
-		opts.full ||
+		auditDue ||
 		Object.keys(state.config).length > 0 ||
 		Object.keys(local).length > 0 ||
 		opts.journalCandidateIds.size > 0;
 	const configRoot = needsRemote
 		? await findConfigRoot(deps.client, state)
 		: null;
-	const audit =
-		opts.full || state.configRootId === undefined || !configRoot;
+	const audit = auditDue && configRoot !== null;
 	const pageByRel = new Map<string, string>();
 	for (const [rel, b] of Object.entries(state.config)) {
 		pageByRel.set(rel, b.pageId);
@@ -349,6 +419,7 @@ export async function syncConfig(
 				remote[rel] = { deleted: true };
 			}
 		}
+		state.lastConfigAudit = now;
 	}
 
 	// ---- plan + apply ----
