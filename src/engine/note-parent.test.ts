@@ -158,3 +158,30 @@ describe("child pages of a note", () => {
 		expect(b.read("a/b.md")).toBe("parent body\n");
 	});
 });
+
+describe("a page parented by a block", () => {
+	it("keeps its base parent — not treated as moved to the vault root", async () => {
+		const { fake, a, b } = setup();
+		a.write("dir/note.md", "body\n");
+		await a.sync();
+		await b.sync();
+		const id = Object.entries(b.state.entries).find(
+			([, e]) => e.path === "dir/note.md",
+		)![0];
+
+		// GET /pages/{id} now reports `parent: { type: "block_id" }` —
+		// pageInfo surfaces that as `parent: null`. The incremental search
+		// (structure scan off) makes the page an evaluate candidate.
+		fake.humanReparentUnderBlock(id);
+		fake.humanEdit(id, "body edited in notion\n");
+		b.deps.engine.scanStructureEveryRound = false;
+
+		const r = await b.sync();
+		expect(r.failed).toBe(0);
+		// the buggy read: parent null → root → moveLocal "note.md" to /
+		expect(has(b, "dir/note.md")).toBe(true);
+		expect(has(b, "note.md")).toBe(false);
+		// and the content evaluation still ran (the edit was pulled)
+		expect(b.read("dir/note.md")).toBe("body edited in notion\n");
+	});
+});

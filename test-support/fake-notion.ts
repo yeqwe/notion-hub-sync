@@ -157,6 +157,15 @@ export class FakeNotion {
 		this.bump(p);
 	}
 
+	/** Park a page under a non-page parent (column, toggle, synced block):
+	 * the real API then reports `parent: { type: "block_id", … }`, which
+	 * pageInfo cannot express and surfaces as `parent: null`. */
+	humanReparentUnderBlock(pageId: string): void {
+		const p = this.must(pageId);
+		p.parentId = `block${p.id}`;
+		this.bump(p);
+	}
+
 	humanRename(pageId: string, title: string): void {
 		const p = this.must(pageId);
 		p.title = title;
@@ -481,7 +490,10 @@ export class FakeNotion {
 		return {
 			object: "page",
 			id: p.id,
-			parent: { type: "page_id", page_id: p.parentId },
+			parent:
+				p.parentId !== "" && !this.pages.has(p.parentId)
+					? { type: "block_id", block_id: p.parentId }
+					: { type: "page_id", page_id: p.parentId },
 			properties: {
 				title: { title: [{ plain_text: p.title }] },
 			},

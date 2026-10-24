@@ -554,13 +554,26 @@ export async function snapshotRemote(
 			}
 			return;
 		}
-		const parent = parentRef(
-			info.parent,
-			rootHex,
-			state,
-			remoteAdded,
-			pendingNew,
-		);
+		// `info.parent === null` for a KNOWN entry means the API parent is
+		// not a page (a column, toggle or synced block — pageInfo cannot
+		// express those). That is not "moved to the vault root": keep the
+		// base parent and evaluate content only, or the planner would
+		// moveLocal the note to `/`.
+		const parent =
+			info.parent === null
+				? ({
+						id:
+							hex(entry.parentId) === rootHex
+								? "root"
+								: hex(entry.parentId),
+					} as ParentRef)
+				: parentRef(
+						info.parent,
+						rootHex,
+						state,
+						remoteAdded,
+						pendingNew,
+					);
 		if (parent === null) {
 			remote[id] = { deleted: true }; // moved outside our tree
 			return;
