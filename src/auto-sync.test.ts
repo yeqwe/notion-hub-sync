@@ -279,7 +279,10 @@ describe("no self-feeding rounds", () => {
 		expect(h.calls.length).toBe(1);
 	});
 
-	it("edits during a round do not stack a debounce timer", async () => {
+	it("an edit during a round fires once shortly after it ends", async () => {
+		// Dropping the event while busy meant the edit waited for the next
+		// 10-minute interval. The debounce now re-arms itself until the
+		// round finishes, then fires exactly one light round.
 		let release!: () => void;
 		const gate = new Promise<void>((r) => (release = r));
 		const h = harness({
@@ -292,11 +295,47 @@ describe("no self-feeding rounds", () => {
 		h.fireTimer();
 		await Promise.resolve();
 		expect(h.calls.length).toBe(1);
+
+		// the edit lands mid-round: a timer is armed even though we are busy
 		h.vaultCallbacks.get("modify")!("b.md");
+		expect(h.timers.size).toBe(1);
+		// when it elapses while still busy, it re-arms instead of firing
+		// (invoked directly: fireTimer() would also clear the re-armed id)
+		const elapsed = [...h.timers.values()][0]!;
+		h.timers.clear();
+		elapsed();
+		expect(h.calls.length).toBe(1);
+		expect(h.timers.size).toBe(1);
+
+		release();
+		// let the whole promise tail run so `running` is cleared
+		await new Promise((r) => setTimeout(r, 0));
+		// the re-armed timer now fires — exactly one follow-up round
+		h.fireTimer();
+		await new Promise((r) => setTimeout(r, 0));
+		expect(h.calls).toEqual(["request", "request"]);
+		expect(h.lights).toEqual([true, true]);
+	});
+
+	it("a round with no edits during it triggers no follow-up", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((r) => (release = r));
+		const h = harness({
+			request: async () => {
+				await gate;
+				return newReport();
+			},
+		});
+		h.vaultCallbacks.get("modify")!("a.md");
+		h.fireTimer();
+		await Promise.resolve();
+		expect(h.calls.length).toBe(1);
 		expect(h.timers.size).toBe(0);
 		release();
 		await Promise.resolve();
 		await Promise.resolve();
+		h.fireTimer(); // nothing armed — nothing fires
+		expect(h.calls.length).toBe(1);
 	});
 
 	it("a round started by a command also blocks the triggers", () => {

@@ -183,18 +183,25 @@ export function wireAutoSync(
 	};
 
 	let timer: number | null = null;
-	const schedule = () => {
-		if (!autoSyncAllowed(hooks.getSettings(), hooks.getState())) return;
-		// Edits made while a round runs are picked up by the next round; the
-		// debounce timer must not stack a second one on top of it.
-		if (busy()) return;
-		if (timer !== null) clearTimeoutFn(timer);
+	const armTimer = () => {
 		timer = setTimeoutFn(() => {
 			timer = null;
+			if (busy()) {
+				// A round is in flight — the edit that armed this timer must
+				// not wait for the next 10-minute interval. Re-arm the same
+				// debounce so a light round fires shortly after it ends.
+				armTimer();
+				return;
+			}
 			// An edit-triggered round only needs to push what changed — the
 			// full remote structure scan is wasted work every pause in typing.
 			fire(true);
 		}, Math.max(1, hooks.getSettings().autoSyncDebounceSeconds) * 1000);
+	};
+	const schedule = () => {
+		if (!autoSyncAllowed(hooks.getSettings(), hooks.getState())) return;
+		if (timer !== null) clearTimeoutFn(timer);
+		armTimer();
 	};
 
 	const relevant = (path: string) =>
