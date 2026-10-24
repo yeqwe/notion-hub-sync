@@ -219,16 +219,35 @@ export async function snapshotRemote(
 		state.searchCursor = new Date(opts.now).toISOString();
 	}
 
-	// ---- round-robin ----
-	// RR-only candidates get a cheaper eval: files detect remote deletion via
-	// the content call (children 404 on trashed pages — probed), so the
-	// GET /pages step is skipped for them. Notes still need GET /pages
-	// (markdown returns 200 on trashed pages — probed).
+	// ---- round-robin (content spot check) ----
+	// The structural scan above proves every page still EXISTS, but not that its
+	// CONTENT is unchanged: `/search` returns no hash, and `last_edited_time`
+	// is minute-rounded and not bumped by API writes, so a same-minute edit is
+	// invisible to it. Comparing every page's content each round would cost
+	// one download per file (2000 pages ≈ 11 min at 3 req/s) — unaffordable on
+	// a phone — so a SAMPLE is taken instead.
+	//
+	// The order is "least recently content-checked first", which guarantees a
+	// full sweep of the vault in ceil(files / roundRobinPerRound) rounds
+	// (500 files at 10/round = 50 rounds ≈ 4 h at the default 5-min interval).
+	// A fancier order was tried — favour "recently edited" pages, on the theory
+	// that missed edits cluster there — and dropped: it made the guarantee
+	// worse for the quiet majority without measurably helping the noisy few,
+	// because a page whose timestamp moved is ALREADY a candidate from the
+	// scan and never consumes the sample budget.
+	//
+	// Two exceptions are pulled to the front because they have no fallback:
+	//   • no base sha (content never verified — nothing to compare against)
+	//   • never checked at all (`checkedAt` unset)
 	const rrOnly = new Set<string>();
 	if (opts.roundRobinPerRound > 0) {
+		const score = (e: SyncEntry): number =>
+			entrySha(e) === null
+				? -1e15
+				: (e.checkedAt ?? -1e15);
 		const rr = Object.entries(state.entries)
 			.filter(([, e]) => e.kind !== "folder")
-			.sort((a, b) => (a[1].checkedAt ?? 0) - (b[1].checkedAt ?? 0))
+			.sort((a, b) => score(a[1]) - score(b[1]))
 			.slice(0, opts.roundRobinPerRound);
 		for (const [id] of rr) {
 			if (!candidates.has(id)) rrOnly.add(id);
