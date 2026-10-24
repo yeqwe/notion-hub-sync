@@ -56,7 +56,13 @@ export interface AutoSyncHooks {
 	 * remote metadata then decides "local subtree gone" and trashes the
 	 * remote pages. A directory operation is rare; a full enumeration is
 	 * cheap next to re-creating pages the other device can never find again. */
-	request(opts?: { forceAudit?: boolean }): Promise<SyncReport>;
+	request(opts?: {
+		forceAudit?: boolean;
+		/** A "light" round skips the full remote structure scan — used for
+		 * debounced edit triggers, which fire every pause in typing and do
+		 * not need a workspace-wide /search to push one changed note. */
+		light?: boolean;
+	}): Promise<SyncReport>;
 	/** called on every relevant vault change, before the debounce fires:
 	 * lets the host keep the "pending changes" list honest without a second
 	 * event subscription (and without a second debounce timer). */
@@ -146,14 +152,20 @@ export function wireAutoSync(
 	let running = false;
 	const busy = (): boolean => running || hooks.isSyncing?.() === true;
 
-	const fire = () => {
+	const fire = (light = false) => {
 		if (busy()) return;
 		if (!autoSyncAllowed(hooks.getSettings(), hooks.getState())) return;
 		const forceAudit = pendingForceAudit;
 		pendingForceAudit = false;
 		running = true;
 		void hooks
-			.request(forceAudit ? { forceAudit: true } : undefined)
+			.request(
+				forceAudit
+					? { forceAudit: true }
+					: light
+						? { light: true }
+						: undefined,
+			)
 			.then(
 				(r) => {
 					// A completed round already stamped `lastSyncAt` itself.
@@ -179,7 +191,9 @@ export function wireAutoSync(
 		if (timer !== null) clearTimeoutFn(timer);
 		timer = setTimeoutFn(() => {
 			timer = null;
-			fire();
+			// An edit-triggered round only needs to push what changed — the
+			// full remote structure scan is wasted work every pause in typing.
+			fire(true);
 		}, Math.max(1, hooks.getSettings().autoSyncDebounceSeconds) * 1000);
 	};
 

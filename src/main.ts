@@ -290,6 +290,7 @@ export default class NotionHubSyncPlugin extends Plugin {
 						return await this.getRunner().request(
 							false,
 							opts?.forceAudit ?? false,
+							opts?.light ?? false,
 						);
 					} catch (err) {
 						this.syncLog.error(

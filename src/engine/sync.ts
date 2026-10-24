@@ -105,7 +105,7 @@ function makeTrace(deps: SyncDeps): {
 
 export async function runSync(
 	deps: EngineDeps,
-	opts: { full: boolean; forceAudit?: boolean },
+	opts: { full: boolean; forceAudit?: boolean; light?: boolean },
 ): Promise<SyncReport> {
 	const report = newReport();
 	const state = deps.state;
@@ -212,7 +212,16 @@ export async function runSync(
 		remoteSnap = await snapshotRemote(deps, {
 			full: opts.full,
 			forceAudit: coldStart || opts.forceAudit === true,
-			scanStructure: deps.engine.scanStructureEveryRound,
+			// A light round (debounced edit trigger) skips the workspace-wide
+			// structure scan — the journal still carries remote changes. Full,
+			// forced and cold-start rounds always scan.
+			scanStructure:
+				opts.light === true &&
+				!opts.full &&
+				!coldStart &&
+				opts.forceAudit !== true
+					? false
+					: deps.engine.scanStructureEveryRound,
 			roundRobinPerRound: deps.engine.roundRobinPerRound,
 			fullAuditHours: deps.engine.fullAuditHours,
 			links,
@@ -538,7 +547,11 @@ export async function runSync(
  * fetched lazily per round so settings/token changes apply immediately. */
 export class SyncRunner {
 	private running = false;
-	private pending: { full: boolean; forceAudit: boolean } | null = null;
+	private pending: {
+		full: boolean;
+		forceAudit: boolean;
+		light: boolean;
+	} | null = null;
 	private lastReport: SyncReport | null = null;
 
 	constructor(
@@ -546,19 +559,27 @@ export class SyncRunner {
 		private readonly onReport?: (r: SyncReport, full: boolean) => void,
 		private readonly runRound: (
 			deps: EngineDeps,
-			opts: { full: boolean; forceAudit?: boolean },
+			opts: { full: boolean; forceAudit?: boolean; light?: boolean },
 		) => Promise<SyncReport> = runSync,
 	) {}
 
 	/** `forceAudit` re-enumerates the whole remote tree even when the audit
 	 * timer has not expired — used after a directory-level rename/delete,
-	 * where an incremental round could read a moved subtree as "deleted". */
-	async request(full = false, forceAudit = false): Promise<SyncReport> {
+	 * where an incremental round could read a moved subtree as "deleted".
+	 * `light` skips the structure scan; it survives coalescing only if every
+	 * folded request was light (a full or forced request always scans). */
+	async request(
+		full = false,
+		forceAudit = false,
+		light = false,
+	): Promise<SyncReport> {
+		const reqLight = light && !full && !forceAudit;
 		if (this.running) {
 			this.pending = {
 				full: full || (this.pending?.full ?? false),
 				forceAudit:
 					forceAudit || (this.pending?.forceAudit ?? false),
+				light: (this.pending?.light ?? true) && reqLight,
 			};
 			// waiters get the follow-up round's report
 			while (this.running) {
@@ -568,6 +589,7 @@ export class SyncRunner {
 		}
 		let wantFull = full;
 		let wantAudit = forceAudit;
+		let wantLight = reqLight;
 		do {
 			this.pending = null;
 			this.running = true;
@@ -577,6 +599,7 @@ export class SyncRunner {
 					this.lastReport = await this.runRound(deps, {
 						full: wantFull,
 						forceAudit: wantAudit,
+						light: wantLight,
 					});
 					this.onReport?.(this.lastReport, wantFull);
 				}
@@ -586,9 +609,11 @@ export class SyncRunner {
 			const pend = this.pending as {
 				full: boolean;
 				forceAudit: boolean;
+				light: boolean;
 			} | null;
 			wantFull = pend?.full ?? false;
 			wantAudit = pend?.forceAudit ?? false;
+			wantLight = pend?.light ?? false;
 		} while (this.pending !== null);
 		return this.lastReport ?? newReport();
 	}

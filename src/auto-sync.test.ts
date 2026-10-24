@@ -47,6 +47,8 @@ function harness(overrides?: Partial<AutoSyncHooks>) {
 	const calls: string[] = [];
 	/** forceAudit flag of each round that actually fired, in order. */
 	const forceAudit: boolean[] = [];
+	/** light flag of each round that actually fired, in order. */
+	const lights: boolean[] = [];
 	const timers = new Map<number, () => void>();
 	let nextTimer = 1;
 	let intervalCb: (() => void) | null = null;
@@ -86,6 +88,7 @@ function harness(overrides?: Partial<AutoSyncHooks>) {
 		request: async (opts) => {
 			calls.push("request");
 			forceAudit.push(opts?.forceAudit ?? false);
+			lights.push(opts?.light ?? false);
 			return overrides?.request
 				? overrides.request(opts)
 				: newReport();
@@ -114,6 +117,7 @@ function harness(overrides?: Partial<AutoSyncHooks>) {
 		state,
 		writes,
 		forceAudit,
+		lights,
 		roundEnds,
 		errors,
 		runInterval: () => intervalCb?.(),
@@ -154,6 +158,32 @@ describe("wireAutoSync", () => {
 		h.state.lastSyncAt = 1_000_000 - 6 * 60_000;
 		h.runInterval();
 		expect(h.calls).toEqual(["request"]);
+	});
+
+	it("an edit-triggered round is light; the interval round is not", async () => {
+		// Typing pauses fire every few seconds — those rounds must not pay
+		// for a workspace-wide structure scan. The 10-min interval can.
+		const h = harness({ now: () => 1_000_000 });
+		h.vaultCallbacks.get("modify")!("a.md");
+		h.fireTimer();
+		await Promise.resolve();
+		await Promise.resolve(); // let the round's promise tail clear `running`
+		expect(h.lights).toEqual([true]);
+
+		h.state.lastSyncAt = 1_000_000 - 6 * 60_000;
+		h.runInterval();
+		await Promise.resolve();
+		expect(h.calls).toEqual(["request", "request"]);
+		expect(h.lights).toEqual([true, false]);
+	});
+
+	it("a forced audit is never light", async () => {
+		const h = harness();
+		h.vaultCallbacks.get("delete")!("OldDir", undefined, true);
+		h.fireTimer();
+		await Promise.resolve();
+		expect(h.forceAudit).toEqual([true]);
+		expect(h.lights).toEqual([false]);
 	});
 
 	it("a directory event upgrades the round to a full audit", () => {

@@ -64,6 +64,69 @@ describe("SyncRunner", () => {
 		expect(maxConcurrent).toBe(1);
 	});
 
+	it("a follow-up round is light only if every coalesced request was", async () => {
+		const seen: Array<{ full: boolean; light: boolean }> = [];
+		let release: () => void = () => {};
+		const runner = new SyncRunner(
+			async () => stubDeps(),
+			undefined,
+			async (_deps, opts) => {
+				seen.push({
+					full: opts.full,
+					light: opts.light === true,
+				});
+				await new Promise<void>((r) => {
+					release = r;
+				});
+				return newReport();
+			},
+		);
+		const drain = async () => {
+			release();
+			await new Promise((r) => setTimeout(r, 20));
+		};
+
+		// two light requests fold into one light follow-up
+		const a1 = runner.request(false, false, true);
+		await new Promise((r) => setTimeout(r, 5));
+		const a2 = runner.request(false, false, true);
+		const a3 = runner.request(false, false, true);
+		await drain(); // round 1
+		await drain(); // follow-up
+		await Promise.all([a1, a2, a3]);
+		expect(seen).toEqual([
+			{ full: false, light: true },
+			{ full: false, light: true },
+		]);
+
+		// one non-light request in the batch poisons the follow-up
+		seen.length = 0;
+		const b1 = runner.request(false, false, true);
+		await new Promise((r) => setTimeout(r, 5));
+		const b2 = runner.request(false, false, true);
+		const b3 = runner.request(); // plain request → must scan
+		await drain();
+		await drain();
+		await Promise.all([b1, b2, b3]);
+		expect(seen).toEqual([
+			{ full: false, light: true },
+			{ full: false, light: false },
+		]);
+
+		// a forced audit also forces the scan back on
+		seen.length = 0;
+		const c1 = runner.request(false, false, true);
+		await new Promise((r) => setTimeout(r, 5));
+		const c2 = runner.request(false, true, true);
+		await drain();
+		await drain();
+		await Promise.all([c1, c2]);
+		expect(seen).toEqual([
+			{ full: false, light: true },
+			{ full: false, light: false },
+		]);
+	});
+
 	it("fetches fresh deps per round", async () => {
 		let depsCalls = 0;
 		const runner = new SyncRunner(

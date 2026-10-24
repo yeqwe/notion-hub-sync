@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 import { FakeNotion } from "../../test-support/fake-notion";
 import { makeDevice, fileExists, type Device } from "../../test-support/device";
+import { runSync } from "./sync";
 import { defaultConfigSync } from "../config/filter";
 
 function setup(rr = 0) {
@@ -81,6 +82,25 @@ describe("每轮结构扫描", () => {
 		await b.sync();
 		expect(fileExists(b, "new.md")).toBe(true);
 		expect(fileExists(b, "old.md")).toBe(false);
+	});
+
+	it("light 轮跳过结构扫描，普通轮照扫", async () => {
+		// 编辑触发的轮次每分钟都可能来一次，不该每轮都付一次全工作区
+		// 结构扫描的代价。journal/增量 search 仍然保留 —— 对端经 journal
+		// 传来的删除在 light 轮依旧生效，这里只断言扫描本身没跑。
+		const { a } = setup();
+		a.write("keep.md", "keep\n");
+		await a.sync();
+
+		const msgs: string[] = [];
+		a.deps.debug = (m) => msgs.push(m);
+		await runSync(a.deps, { full: false, light: true });
+		expect(msgs).toContain("audit: not due this round");
+		expect(msgs.some((m) => m.startsWith("audit: search "))).toBe(false);
+
+		msgs.length = 0;
+		await runSync(a.deps, { full: false });
+		expect(msgs.some((m) => m.startsWith("audit: search "))).toBe(true);
 	});
 
 	it("结构扫描的请求数随页数线性增长（100 页/请求）", async () => {
