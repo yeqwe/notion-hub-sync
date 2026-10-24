@@ -352,6 +352,11 @@ export async function runSync(
 		).length,
 	});
 
+	if (localSnap.massDeletion) {
+		report.warnings.push(
+			"the local listing looked incomplete (a large share of the vault seemed to vanish) — deletions were skipped this round; run sync again once Obsidian has finished loading",
+		);
+	}
 	// 5. apply
 	for (const n of remoteSnap.nestedUnderPage ?? []) {
 		report.warnings.push(

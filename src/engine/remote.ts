@@ -26,6 +26,7 @@ import {
 	auditSearchScan,
 	entrySha,
 	getPage,
+	probePage,
 	hex,
 	isSystemPage,
 	nameFor,
@@ -309,7 +310,22 @@ export async function snapshotRemote(
 			}
 			for (const id of Object.keys(state.entries)) {
 				if (!seenIds.has(id)) {
-					remote[id] = { deleted: true };
+					// The walk is the fallback for a broken /search. A page it did
+					// not visit is only deleted if a direct GET says so — an
+					// incomplete walk (a parent that returned 5xx, a subtree that
+					// hit the depth cap) must not read as "the user deleted it".
+					const probe = await probePage(deps.client, id);
+					if (probe.unknown) {
+						deps.debug?.(
+							`audit: walk missed ${state.entries[id]?.path ?? id} and could not confirm — kept`,
+						);
+						continue;
+					}
+					if (probe.info === null || probe.info.inTrash) {
+						remote[id] = { deleted: true };
+					} else {
+						seenIds.add(id);
+					}
 				}
 			}
 		}
@@ -391,19 +407,53 @@ export async function snapshotRemote(
 				};
 				if (r.bytes) fetchedBytes.set(id, r.bytes);
 				fetchedMeta.set(id, { ...fetchedMeta.get(id), ...r.meta });
-			} catch {
-				remote[id] = { deleted: true };
+			} catch (err) {
+				// The children call 404s on a trashed page — but a 500, a
+				// dropped connection or a rate limit says nothing about whether
+				// the page exists. Reading either as "deleted" trashed the local
+				// file, so only a real 404/400 may mark it gone.
+				const status = (err as { status?: number }).status;
+				if (status === 400 || status === 404) {
+					remote[id] = { deleted: true };
+				} else {
+					deps.debug?.(
+						`evaluate: ${entry.path} unreadable (${status ?? "network"}) — deletion NOT assumed`,
+					);
+				}
 			}
 			entry.checkedAt = opts.now;
 			return;
 		}
-		const info =
+		const audited = auditPages?.get(id);
+		let info =
 			entry !== undefined
-				? auditPages?.get(id) ?? (await getPage(deps.client, id))
+				? audited ?? (await getPage(deps.client, id))
 				: await getPage(deps.client, id);
 		if (!info || info.inTrash) {
-			if (entry) remote[id] = { deleted: true };
-			return;
+			// `getPage` collapses "gone" and "could not ask" into null. Only a
+			// REAL answer may mark the entry deleted: a network blip on this
+			// one request used to read as "the page is gone" and trash the
+			// local file. The audit map is not an answer either — it was built
+			// earlier and only proves what the scan saw, so probe afresh.
+			const probe =
+				audited && audited.inTrash
+					? { info: audited, unknown: false }
+					: await probePage(deps.client, id);
+			if (probe.unknown) {
+				deps.debug?.(
+					`evaluate: ${entry?.path ?? id} unreadable — deletion NOT assumed`,
+				);
+				if (entry) entry.checkedAt = opts.now;
+				return;
+			}
+			if (probe.info !== null && !probe.info.inTrash) {
+				// The re-probe found the page after all: carry on with it
+				// instead of pretending it is gone.
+				info = probe.info;
+			} else {
+				if (entry) remote[id] = { deleted: true };
+				return;
+			}
 		}
 		if (isSystemPage(info, sys)) {
 			// a page that drifted into a system subtree: nothing to sync, but

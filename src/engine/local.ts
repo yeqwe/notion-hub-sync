@@ -28,6 +28,10 @@ export interface LocalSnapshot {
 	claimed: Set<string>;
 	/** paths blocked this round (unreadable, case clash, out of scope). */
 	blocked: BlockedPath[];
+	/** The local listing looked incomplete (a large share of the base
+	 * vanished at once). Deletions were suppressed for this round — see the
+	 * sanity check in `snapshotLocal`. */
+	massDeletion: boolean;
 	/** What the scan actually did — the caller decides whether a milestone
 	 * line is worth printing (an idle round should stay quiet). */
 	stats: {
@@ -192,6 +196,8 @@ export async function snapshotLocal(
 
 	const local: Record<string, Side> = {};
 	const claimed = new Set<string>();
+	/** ids that look deleted locally but must not be believed. */
+	const suspect = new Set<string>();
 	let reused = 0;
 	let hashed = 0;
 	for (const [id, e] of Object.entries(state.entries)) {
@@ -203,20 +209,40 @@ export async function snapshotLocal(
 			continue;
 		}
 		if (e.kind === "folder") {
-			local[id] = folderSet.has(p)
-				? {
-						deleted: false,
-						parent: parentRefFor(parentDir(p)),
-						name: basename(p),
-						sha: null,
-					}
-				: { deleted: true };
-			if (folderSet.has(p)) claimed.add(p);
+			if (folderSet.has(p)) {
+				local[id] = {
+					deleted: false,
+					parent: parentRefFor(parentDir(p)),
+					name: basename(p),
+					sha: null,
+				};
+				claimed.add(p);
+			} else if (await vault.exists(p)) {
+				// Same as files: the listing can miss a directory that exists.
+				debug?.(`local ${p}: folder missing from the listing but on disk — not a deletion`);
+				suspect.add(id);
+			} else {
+				local[id] = { deleted: true };
+				suspect.add(id);
+			}
 			continue;
 		}
 		const f = fileByPath.get(p);
 		if (!f) {
+			// The listing did not mention this path. Before believing that the
+			// user deleted it, ask the filesystem directly: `list()` comes from
+			// the vault index, which on mobile is populated asynchronously and
+			// can miss a file that is right there on disk. Believing the index
+			// trashed the page in Notion — the only remaining copy.
+			if (await vault.exists(p)) {
+				debug?.(
+					`local ${p}: missing from the listing but present on disk — not a deletion`,
+				);
+				suspect.add(id);
+				continue; // leave unevaluated: reads as "unchanged" to the planner
+			}
 			local[id] = { deleted: true };
+			suspect.add(id);
 			continue;
 		}
 		claimed.add(p);
@@ -325,6 +351,56 @@ export async function snapshotLocal(
 			`${renameDetected} rename(s) detected, ${localAdded.length} local-only item(s)`,
 	);
 
+	// ---- mass-deletion sanity check ----
+	// A vault listing that suddenly loses a large share of the base is far
+	// more likely to be a half-loaded index (mobile: the vault is still
+	// opening, a folder failed to enumerate) than a user deleting half their
+	// notes. Believing it would trash those pages in Notion — the only copy
+	// left, since the local files are supposedly gone too. Refuse to plan
+	// deletions this round instead: nothing is lost, and the next round (with
+	// a complete listing) decides normally.
+	//
+	// Threshold is deliberately high: deleting 10 notes out of 12 in one round
+	// is legitimate, deleting 45% of a 100-file vault between two rounds is
+	// not something people do by accident in Obsidian.
+	//
+	// A whole subtree disappearing is the legitimate case and must still work
+	// (delete `Big/` and its five empty children are all gone at once): only
+	// count entries whose PARENT is still there. If the parent is gone too,
+	// this is one directory operation, not a mass deletion.
+	const gone = new Set(
+		Object.entries(local)
+			.filter(([, s]) => s.deleted === true)
+			.map(([id]) => id),
+	);
+	const isUnderGone = (path: string): boolean => {
+		let dir = parentDir(path);
+		while (dir !== "") {
+			const fid = folderIdByPath.get(dir);
+			if (fid && fid !== "root" && gone.has(fid)) return true;
+			dir = parentDir(dir);
+		}
+		return false;
+	};
+	const orphans = [...gone].filter(
+		(id) => !isUnderGone(state.entries[id]?.path ?? ""),
+	);
+	const evaluated = Object.keys(local).length;
+	const MASS_DELETE_FRACTION = 0.4;
+	const MASS_DELETE_MIN = 5;
+	let massDeletion = false;
+	if (
+		orphans.length >= MASS_DELETE_MIN &&
+		evaluated > 0 &&
+		orphans.length / evaluated >= MASS_DELETE_FRACTION
+	) {
+		massDeletion = true;
+		debug?.(
+			`local: ${orphans.length}/${evaluated} unrelated entries look deleted — treating the listing as incomplete, deletions suppressed this round`,
+		);
+		for (const id of suspect) delete local[id];
+	}
+
 	return {
 		local,
 		localAdded,
@@ -332,6 +408,7 @@ export async function snapshotLocal(
 		folderIdByPath,
 		claimed,
 		blocked,
+		massDeletion,
 		stats: {
 			listedFiles: fileByPath.size,
 			listedFolders: folderSet.size,

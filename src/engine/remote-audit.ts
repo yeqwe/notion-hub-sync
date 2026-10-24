@@ -79,19 +79,48 @@ export function pageInfo(p: {
 	};
 }
 
-export async function getPage(
+export interface PageProbe {
+	/** the page, or null when it is genuinely gone (404 / archived). */
+	info: PageInfo | null;
+	/** the probe could not establish anything (network, 5xx, rate limit).
+	 * Callers MUST NOT read `info === null` as "deleted" in that case —
+	 * conflating "I could not ask" with "it is not there" is what trashed
+	 * local files and remote pages nobody had deleted. */
+	unknown: boolean;
+}
+
+/** Probe one page, distinguishing "gone" from "could not tell".
+ *
+ * A 404 means the page is not there any more and that is an answer. A dropped
+ * connection, a 500, a timeout and a rejected token are all NOT answers: the
+ * page is probably fine. `getPage` collapses both into `null`, which the
+ * deletion paths used to read as "deleted" — one network hiccup and a note
+ * disappeared from the vault, or its page was trashed in Notion. */
+export async function probePage(
 	client: NotionClient,
 	id: string,
-): Promise<PageInfo | null> {
+): Promise<PageProbe> {
 	try {
 		const res = await client.request<Parameters<typeof pageInfo>[0]>(
 			"GET",
 			`/pages/${id}`,
 		);
-		return pageInfo(res);
-	} catch {
-		return null;
+		return { info: pageInfo(res), unknown: false };
+	} catch (err) {
+		const status = (err as { status?: number }).status;
+		// 400 = malformed id, 404 = gone: both are real answers.
+		if (status === 400 || status === 404) {
+			return { info: null, unknown: false };
+		}
+		return { info: null, unknown: true };
 	}
+}
+
+export async function getPage(
+	client: NotionClient,
+	id: string,
+): Promise<PageInfo | null> {
+	return (await probePage(client, id)).info;
 }
 
 /** ids of the reserved system pages (journal/history/config roots). */
@@ -510,8 +539,15 @@ export async function auditSearchScan(
 		);
 	}
 	for (const id of unseen) {
-		const p = await getPage(deps.client, id);
-		if (p === null || p.inTrash) {
+		const probe = await probePage(deps.client, id);
+		if (probe.unknown) {
+			// Could not establish anything. "Not seen" + "could not ask" is
+			// NOT a deletion: leave the entry alone so nothing is trashed on
+			// either side, and let the next round decide.
+			deps.debug?.(`audit: ${id} unreadable — deletion NOT assumed`);
+			continue;
+		}
+		if (probe.info === null || probe.info.inTrash) {
 			remote[id] = { deleted: true };
 		} else {
 			// index lag —still in the tree, structure assumed unchanged.
