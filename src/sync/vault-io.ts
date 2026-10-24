@@ -48,6 +48,12 @@ export interface VaultIO {
 	/** Expected writes/creates/deletes (path→path) so engine file ops
 	 * don't re-trigger auto-sync. */
 	readonly writes: import("./rename-tracker").RenameTracker;
+	/** True when the file is open in an editor whose text differs from
+	 * what is on disk (unsaved typing): overwriting it would either be
+	 * lost, or — worse — be written back over our write on the next save,
+	 * silently reverting a pull. Optional: IOs without an editor concept
+	 * leave it undefined. */
+	editorDirty?(path: string): Promise<boolean>;
 	/** Move a path to the trash (Obsidian trash / .trash/ dir in tests). */
 	trash(path: string): Promise<void>;
 }

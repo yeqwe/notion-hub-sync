@@ -104,3 +104,21 @@ export class Setting {
 		return this;
 	}
 }
+
+export class TFile {
+	path = "";
+	extension = "md";
+	stat = { size: 0, mtime: 0 };
+}
+
+export class MarkdownView {
+	file: { path: string } | null = null;
+	editor = {
+		getValue: (): string => "",
+		setValue: (_text: string): void => {},
+		getCursor: (): { line: number; ch: number } => ({ line: 0, ch: 0 }),
+		setCursor: (_pos: { line: number; ch: number }): void => {},
+		lineCount: (): number => 0,
+		getLine: (_line: number): string => "",
+	};
+}

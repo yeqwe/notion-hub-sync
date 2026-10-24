@@ -925,6 +925,7 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 				break;
 			}
 			const e = entryOf(ctx, action.id)!;
+			if (await editorDefer(ctx, action.type, e)) break;
 			const bytes = await remoteBytes(ctx, action.id);
 			if (action.stale) {
 				report.warnings.push(
@@ -972,6 +973,7 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 				break;
 			}
 			const e = entryOf(ctx, action.id)!;
+			if (await editorDefer(ctx, action.type, e)) break;
 			const base = await ctx.baseStore.get(action.id);
 			const remote = dec.decode(await remoteBytes(ctx, action.id));
 			const local = dec.decode(
@@ -1009,6 +1011,8 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 				report.skipped++;
 				break;
 			}
+			const e = entryOf(ctx, action.id)!;
+			if (await editorDefer(ctx, action.type, e)) break;
 			await doConflictCopy(ctx, action.id);
 			break;
 		}
@@ -1177,6 +1181,7 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 		}
 		case "restoreLocal": {
 			const e = entryOf(ctx, action.id)!;
+			if (await editorDefer(ctx, action.type, e)) break;
 			// land at the remote location (remote may also have moved)
 			const rside = ctx.remoteSnap.remote[action.id];
 			const rdir =
@@ -1214,12 +1219,32 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 	}
 }
 
+/** The user is typing in an open editor — don't write under it (the stale
+ * buffer would be saved back over our write and read as a user edit). The
+ * evaluation's `remoteEdited` stamp must be undone too: it tells the search
+ * gate "already evaluated", so a deferred pull would otherwise never be
+ * looked at again and the remote edit would be lost for good. */
+async function editorDefer(
+	ctx: ApplyCtx,
+	type: string,
+	e: SyncEntry,
+): Promise<boolean> {
+	if (!(await ctx.deps.vault.editorDirty?.(e.path))) return false;
+	ctx.report.skipped++;
+	delete e.remoteEdited;
+	ctx.deps.debug?.(
+		`${type} ${e.path}: open editor has unsaved changes — deferred`,
+	);
+	return true;
+}
+
 async function doConflictCopy(
 	ctx: ApplyCtx,
 	id: string,
 ): Promise<void> {
 	const { deps, report } = ctx;
 	const e = entryOf(ctx, id)!;
+	if (await editorDefer(ctx, "conflictCopy", e)) return;
 	const local = new Uint8Array(await deps.vault.readBinary(e.path));
 	const copy = conflictPath(
 		e.path,

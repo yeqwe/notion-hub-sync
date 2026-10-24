@@ -19,7 +19,7 @@ import {
 } from "./obsidian-vault";
 import { emptyState } from "./state";
 import { sha256Hex } from "./hashes";
-import type { App } from "obsidian";
+import { MarkdownView, type App } from "obsidian";
 
 const ROOT = "40162671-1556-8043-a96b-ff36b3f3d90a";
 const STATE_FILE = "sync-state.json";
@@ -219,5 +219,95 @@ describe("ObsidianVaultIO.writeTextVerified tmp lifecycle", () => {
 		expect(seen.del).toBe(true);
 		expect(fmt(dir).exists("a.md.nhs-tmp")).toBe(false);
 		expect(readFileSync(join(dir, "a.md"), "utf8")).toBe("verified body");
+	});
+});
+
+describe("ObsidianVaultIO open-editor handling", () => {
+	// Obsidian does not reload an open editor when a plugin writes under
+	// it: the stale document is saved back over the pull later and reads
+	// as a user edit. The IO must both detect the divergence and push the
+	// new text into the open editor itself.
+	class FakeView extends MarkdownView {
+		constructor(path: string, text: string) {
+			super(undefined as never);
+			this.file = { path } as never;
+			let doc = text;
+			this.editor = {
+				getValue: () => doc,
+				setValue: (t: string) => {
+					doc = t;
+				},
+				getCursor: () => ({ line: 0, ch: 0 }),
+				setCursor: () => {},
+				lineCount: () => doc.split("\n").length,
+				getLine: (n: number) => doc.split("\n")[n] ?? "",
+			} as never;
+		}
+	}
+
+	function editorApp(dir: string) {
+		const abs = (p: string) => join(dir, ...p.split("/").filter(Boolean));
+		const views: FakeView[] = [];
+		const app = {
+			vault: {
+				getAbstractFileByPath: (p: string) =>
+					existsSync(abs(p))
+						? { path: p, extension: "md", stat: { size: 1, mtime: 1 } }
+						: null,
+				read: async (f: { path: string }) =>
+					readFileSync(abs(f.path), "utf8"),
+				createBinary: async (p: string, data: ArrayBuffer) => {
+					writeFileSync(abs(p), new Uint8Array(data));
+				},
+				modifyBinary: async (
+					f: { path: string },
+					data: ArrayBuffer,
+				) => {
+					writeFileSync(abs(f.path), new Uint8Array(data));
+				},
+				adapter: {
+					exists: async (p: string) => existsSync(abs(p)),
+					readBinary: async (p: string) => {
+						const b = readFileSync(abs(p));
+						return b.buffer.slice(
+							b.byteOffset,
+							b.byteOffset + b.byteLength,
+						);
+					},
+					remove: async (p: string) => unlinkSync(abs(p)),
+				},
+			},
+			workspace: {
+				getLeavesOfType: () => views.map((view) => ({ view })),
+			},
+		} as unknown as App;
+		return { app, views };
+	}
+
+	it("a verified write refreshes an open editor to the new text", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "nhs-ed-"));
+		writeFileSync(join(dir, "n.md"), "v1\n");
+		const { app, views } = editorApp(dir);
+		views.push(new FakeView("n.md", "v1\n")); // open, matches disk
+		const io = new ObsidianVaultIO(app);
+		const body = "v2\n";
+		await io.writeTextVerified("n.md", body, await sha256Hex(
+			new TextEncoder().encode(body),
+		));
+		expect(readFileSync(join(dir, "n.md"), "utf8")).toBe("v2\n");
+		expect(views[0]!.editor.getValue()).toBe("v2\n");
+	});
+
+	it("editorDirty is true only when the open editor diverges from disk", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "nhs-ed-"));
+		writeFileSync(join(dir, "n.md"), "v1\n");
+		const { app, views } = editorApp(dir);
+		const io = new ObsidianVaultIO(app);
+		expect(await io.editorDirty("n.md")).toBe(false); // not open
+		const v = new FakeView("n.md", "v1\n");
+		views.push(v);
+		expect(await io.editorDirty("n.md")).toBe(false); // open, clean
+		v.editor.setValue("unsaved typing\n");
+		expect(await io.editorDirty("n.md")).toBe(true);
 	});
 });

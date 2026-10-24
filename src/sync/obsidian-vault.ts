@@ -1,4 +1,10 @@
-import type { App, TAbstractFile, TFile, TFolder } from "obsidian";
+import {
+	MarkdownView,
+	type App,
+	type TAbstractFile,
+	type TFile,
+	type TFolder,
+} from "obsidian";
 import type { VaultFile, VaultIO } from "./vault-io";
 import { WriteVerificationError } from "./vault-io";
 import { emptyState, type SyncState } from "./state";
@@ -62,6 +68,7 @@ export class ObsidianVaultIO implements VaultIO {
 			await this.mkdirp(parentDir(path));
 			await this.app.vault.create(path, content);
 		}
+		this.refreshOpenEditors(path, content);
 	}
 
 	async writeBinary(path: string, data: ArrayBuffer): Promise<void> {
@@ -72,6 +79,57 @@ export class ObsidianVaultIO implements VaultIO {
 		} else {
 			await this.mkdirp(parentDir(path));
 			await this.app.vault.createBinary(path, data);
+		}
+		this.refreshOpenEditors(path, new TextDecoder().decode(data));
+	}
+
+	/** MarkdownViews currently showing `path` (Obsidian keeps one editor
+	 * document per leaf). */
+	private openMarkdownViews(path: string): MarkdownView[] {
+		const views: MarkdownView[] = [];
+		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+			const view = (leaf as { view?: unknown }).view;
+			if (view instanceof MarkdownView && view.file?.path === path) {
+				views.push(view);
+			}
+		}
+		return views;
+	}
+
+	async editorDirty(path: string): Promise<boolean> {
+		for (const view of this.openMarkdownViews(path)) {
+			const file = view.file;
+			if (!file) continue;
+			if (view.editor.getValue() !== (await this.app.vault.read(file))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Obsidian does NOT reload an open source/live-preview editor when a
+	 * plugin writes the file underneath it: the stale CodeMirror document
+	 * then writes the OLD text back over our pull on the next save, which
+	 * reads as a user edit and is pushed to every device. Push the new
+	 * text into open editors ourselves. Best-effort — the write already
+	 * succeeded, so a UI failure must not fail it. */
+	private refreshOpenEditors(path: string, newText: string): void {
+		if (!path.endsWith(".md")) return;
+		try {
+			for (const view of this.openMarkdownViews(path)) {
+				const editor = view.editor;
+				if (editor.getValue() === newText) continue;
+				const cur = editor.getCursor();
+				editor.setValue(newText);
+				const line = Math.min(cur.line, editor.lineCount() - 1);
+				const ch = Math.min(
+					cur.ch,
+					editor.getLine(Math.max(0, line))?.length ?? 0,
+				);
+				editor.setCursor({ line: Math.max(0, line), ch });
+			}
+		} catch {
+			/* UI refresh only */
 		}
 	}
 
@@ -148,6 +206,7 @@ export class ObsidianVaultIO implements VaultIO {
 		} else {
 			await this.app.vault.createBinary(path, buf);
 		}
+		this.refreshOpenEditors(path, new TextDecoder().decode(buf));
 	}
 
 	async mkdirp(path: string): Promise<void> {
