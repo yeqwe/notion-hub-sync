@@ -32,6 +32,10 @@ export interface LocalSnapshot {
 	 * vanished at once). Deletions were suppressed for this round — see the
 	 * sanity check in `snapshotLocal`. */
 	massDeletion: boolean;
+	/** ids whose local file was observed present this round (mtime+size
+	 * recorded), so the next round can tell "the user deleted it" from
+	 * "the listing did not mention it". */
+	seenNow: Map<string, { mtime: number; size: number }>;
 	/** What the scan actually did — the caller decides whether a milestone
 	 * line is worth printing (an idle round should stay quiet). */
 	stats: {
@@ -198,6 +202,8 @@ export async function snapshotLocal(
 	const claimed = new Set<string>();
 	/** ids that look deleted locally but must not be believed. */
 	const suspect = new Set<string>();
+	/** ids whose local file was actually observed present this round. */
+	const seenNow = new Map<string, { mtime: number; size: number }>();
 	let reused = 0;
 	let hashed = 0;
 	for (const [id, e] of Object.entries(state.entries)) {
@@ -217,6 +223,9 @@ export async function snapshotLocal(
 					sha: null,
 				};
 				claimed.add(p);
+				// folders carry no content but still need evidence for the
+				// deletion check (a missing directory is a listing problem too)
+				e.lastSeenAt = Date.now();
 			} else if (await vault.exists(p)) {
 				// Same as files: the listing can miss a directory that exists.
 				debug?.(`local ${p}: folder missing from the listing but on disk — not a deletion`);
@@ -246,6 +255,15 @@ export async function snapshotLocal(
 			continue;
 		}
 		claimed.add(p);
+		seenNow.set(id, { mtime: f.mtime ?? 0, size: f.size });
+		// A file the scan just saw IS evidence for the next round's deletion
+		// check. Stamp it here rather than only in the round-end bookkeeping:
+		// an entry created by this very round (pushNew) would otherwise carry
+		// no evidence until a second round ran, and its first legitimate
+		// deletion would be refused.
+		e.lastSeenMtime = f.mtime ?? 0;
+		e.lastSeenSize = f.size;
+		e.lastSeenAt = Date.now();
 		const baseSha = e.srcSha ?? e.localHash ?? e.fileSha ?? null;
 		const reuse =
 			e.localMtime === f.mtime &&
@@ -373,11 +391,21 @@ export async function snapshotLocal(
 			.filter(([, s]) => s.deleted === true)
 			.map(([id]) => id),
 	);
+	/** Paths whose base entry is gone this round (directories included, so a
+	 * deleted subtree can be recognised from its children's paths). */
+	const gonePaths = new Set(
+		[...gone].map((id) => state.entries[id]?.path ?? "").filter(Boolean),
+	);
 	const isUnderGone = (path: string): boolean => {
 		let dir = parentDir(path);
 		while (dir !== "") {
+			// The directory itself was deleted in this same round → this entry
+			// went with it. That is one user action, not a mass deletion.
 			const fid = folderIdByPath.get(dir);
 			if (fid && fid !== "root" && gone.has(fid)) return true;
+			// The directory no longer exists on disk either, which is the same
+			// situation when the parent had no base entry of its own.
+			if (!folderSet.has(dir) && gonePaths.has(dir)) return true;
 			dir = parentDir(dir);
 		}
 		return false;
@@ -409,6 +437,7 @@ export async function snapshotLocal(
 		claimed,
 		blocked,
 		massDeletion,
+		seenNow,
 		stats: {
 			listedFiles: fileByPath.size,
 			listedFolders: folderSet.size,

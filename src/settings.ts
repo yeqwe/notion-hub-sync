@@ -36,6 +36,12 @@ export interface NotionHubSettings {
 	historyMaxVersions: number;
 	historyRetentionDays: number;
 	fullAuditHours: number;
+	/** Scan the whole remote STRUCTURE every round (`POST /search`, ~1 request
+	 * per 100 pages). On by default: it is what turns "the page is probably
+	 * still there" into an observation, and it replaced the per-entry
+	 * round-robin GETs, so an idle round is CHEAPER with it on. Off restores
+	 * the old journal-only behaviour, including its blind spot. */
+	scanStructureEveryRound: boolean;
 	configSync: ConfigSyncSettings;
 	/** Which file types / folders sync. Notes always sync. */
 	scope: ScopeSettings;
@@ -65,6 +71,7 @@ export const DEFAULT_SETTINGS: NotionHubSettings = {
 	historyMaxVersions: 50,
 	historyRetentionDays: 30,
 	fullAuditHours: 6,
+	scanStructureEveryRound: true,
 	configSync: defaultConfigSync(),
 	scope: defaultScope(),
 	autoSync: true,

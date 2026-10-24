@@ -51,6 +51,8 @@ export interface I18nStrings {
 	settingsHistoryRetentionDays: string;
 	settingsFullAuditHours: string;
 	settingsFullAuditHoursDescription: string;
+	settingsScanEveryRound: string;
+	settingsScanEveryRoundDescription: string;
 	settingsConfigSync: string;
 	settingsConfigSyncToggle: string;
 	settingsConfigSyncDescription: string;
@@ -308,9 +310,12 @@ const EN_STRINGS: I18nStrings = {
 		"Minimum minutes between push versions of the same file.",
 	settingsHistoryMaxVersions: "Max versions per file",
 	settingsHistoryRetentionDays: "Version retention",
-	settingsFullAuditHours: "Full audit interval",
+	settingsFullAuditHours: "Fallback walk interval",
 	settingsFullAuditHoursDescription:
-		"How often sync re-walks the whole Notion tree to catch missed changes.",
+		"Structure is re-scanned from Notion every round (~1 request per 100 pages). This interval only controls the slower per-folder walk used when that scan cannot be trusted.",
+	settingsScanEveryRound: "Scan structure every round",
+	settingsScanEveryRoundDescription:
+		"Check the whole Notion tree each round (~1 request per 100 pages) so a page deleted elsewhere is noticed immediately instead of hours later. Turning it off falls back to the change journal, which can miss deletions.",
 	settingsConfigSync: "Sync Obsidian settings",
 	settingsConfigSyncToggle: "Enable config sync",
 	settingsConfigSyncDescription:
@@ -661,9 +666,12 @@ const ZH_CN_STRINGS: I18nStrings = {
 	settingsHistoryIntervalDescription: "同一文件两次推送版本之间的最小分钟数。",
 	settingsHistoryMaxVersions: "每个文件的最大版本数",
 	settingsHistoryRetentionDays: "版本保留时长",
-	settingsFullAuditHours: "完整检查间隔",
+	settingsFullAuditHours: "备用遍历间隔",
 	settingsFullAuditHoursDescription:
-		"每隔多久重新遍历整个 Notion 树，捕捉遗漏的变更。",
+		"结构扫描每轮都会做（约每 100 页 1 个请求）。这个间隔只控制「搜索结果不可信时」退化的逐目录遍历。",
+	settingsScanEveryRound: "每轮扫描结构",
+	settingsScanEveryRoundDescription:
+		"每轮都核对整个 Notion 页面树（约每 100 页 1 个请求），这样别处删掉的页面会立刻被发现，而不是几小时后。关掉就退回「只靠变更日志」，那种方式会漏掉删除。",
 	settingsConfigSync: "同步 Obsidian 设置",
 	settingsConfigSyncToggle: "启用配置同步",
 	settingsConfigSyncDescription:

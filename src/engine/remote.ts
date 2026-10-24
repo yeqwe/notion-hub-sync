@@ -75,6 +75,10 @@ export interface RemoteOptions {
 	 * scratch. Unlike `full` this does not disable the incremental search
 	 * pass, so the next round keeps its cursor. */
 	forceAudit?: boolean;
+	/** Scan the remote STRUCTURE this round (`POST /search`). When false the
+	 * round trusts the journal + search index — cheaper on a metered
+	 * connection, but a page deleted outside the journal stays invisible. */
+	scanStructure?: boolean;
 	roundRobinPerRound: number;
 	fullAuditHours: number;
 	links: LinkResolver;
@@ -95,11 +99,31 @@ export async function snapshotRemote(
 
 	const candidates = new Set<string>();
 	const outside = new Set(state.outsideTree ?? []);
-	let auditDue =
+	// STRUCTURE IS SCANNED EVERY ROUND by default.
+	//
+	// `auditDue` used to gate the whole structural pass behind a 6-hour timer,
+	// which made "the remote page still exists" a GUESS for most rounds: an
+	// incremental round only looks at journal candidates, search hits and the
+	// round-robin sample, so on a 500-page vault 490 entries were never
+	// checked. A page deleted in Notion (by a human, or by a device whose
+	// journal block had been pruned) stayed invisible until the timer fired.
+	//
+	// Measured cost: `POST /search` returns 100 pages per request, so 2000
+	// pages ≈ 20 requests ≈ 7 s — and it REPLACES the per-entry `GET /pages`
+	// the round-robin needed, so an idle round went from 22 to 14 requests on
+	// a 22-file vault. Observing is both cheaper and correct.
+	//
+	// `fullAuditHours` now only decides when the slower per-folder WALK is used
+	// as a fallback (when /search cannot be trusted), and
+	// `scanStructureEveryRound=false` restores the old journal-only behaviour.
+	const scanStructure =
+		opts.full || opts.forceAudit === true || opts.scanStructure !== false;
+	const walkDue =
 		opts.full ||
 		opts.forceAudit === true ||
 		state.lastFullAudit === undefined ||
 		opts.now - state.lastFullAudit > opts.fullAuditHours * 3_600_000;
+	let auditDue = scanStructure || walkDue;
 
 	// ---- journal ----
 	// A device that has never synced doesn't know the journal page id yet;

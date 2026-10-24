@@ -206,6 +206,10 @@ async function createRemoteFolder(
 		notionTitle: name,
 		parentId,
 		remoteEdited: created.lastEdited,
+		// A folder we just created is on disk now: that is the evidence the
+		// next round's deletion check needs (otherwise the first legitimate
+		// deletion of this folder would be refused as "unexplained").
+		lastSeenAt: ctx.deps.now?.() ?? Date.now(),
 	};
 	await checkpoint(ctx, true); // created page must never be unknown
 	return id;
@@ -236,6 +240,11 @@ async function stampLocal(ctx: ApplyCtx, e: SyncEntry): Promise<void> {
 	if (s) {
 		e.localMtime = s.mtime;
 		e.localSize = s.size;
+		// This file was just written by us and is on disk right now: that is
+		// the evidence the next round's deletion check needs.
+		e.lastSeenMtime = s.mtime;
+		e.lastSeenSize = s.size;
+		e.lastSeenAt = ctx.deps.now?.() ?? Date.now();
 	}
 }
 
@@ -739,7 +748,10 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 				path,
 				"folder",
 				await parentIdOf(ctx, action.parent),
-				{ remoteEdited: addedLastEdited(ctx, action.id) },
+				{
+					remoteEdited: addedLastEdited(ctx, action.id),
+					lastSeenAt: deps.now?.() ?? Date.now(),
+				},
 			);
 			report.created++;
 			break;

@@ -20,6 +20,21 @@ export interface SyncEntry {
 	/** M4: local mtime/size at last sync — lets the local snapshot reuse sha. */
 	localMtime?: number;
 	localSize?: number;
+	/** Local mtime/size as observed at the END of the last round in which this
+	 * entry's local file was actually seen.
+	 *
+	 * This is what makes "the file is gone" mean "the user deleted it". The
+	 * local listing comes from Obsidian's vault index, which on mobile is
+	 * filled asynchronously and can miss a file that is right there on disk;
+	 * a file can also vanish because a write failed or a restore tool removed
+	 * it. RS requires `prevSync == current` before it will propagate a
+	 * deletion, and so do we: if the entry's recorded local state disagrees
+	 * with the base, the disappearance is unexplained and nothing is deleted
+	 * on either side. */
+	lastSeenMtime?: number;
+	lastSeenSize?: number;
+	/** When the local file was last observed present (ms epoch). */
+	lastSeenAt?: number;
 	/** Shas the base held BEFORE the current one, newest first, limited to
 	 * versions that arrived FROM the remote (a pull / conflict copy / restore
 	 * overwrote the local file with them).

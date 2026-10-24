@@ -32,6 +32,9 @@ export interface EngineSettings {
 	deleteGuardThreshold?: number;
 	/** which paths this device syncs at all (absent → everything). */
 	scope?: ScopeSettings;
+	/** Scan the whole remote structure each round (default true). Off falls
+	 * back to journal + search index, which can miss deletions. */
+	scanStructureEveryRound?: boolean;
 }
 
 export interface EngineDeps extends SyncDeps {
@@ -209,6 +212,7 @@ export async function runSync(
 		remoteSnap = await snapshotRemote(deps, {
 			full: opts.full,
 			forceAudit: coldStart || opts.forceAudit === true,
+			scanStructure: deps.engine.scanStructureEveryRound,
 			roundRobinPerRound: deps.engine.roundRobinPerRound,
 			fullAuditHours: deps.engine.fullAuditHours,
 			links,
@@ -294,6 +298,20 @@ export async function runSync(
 			// lets a phone that slept through a day of work restore yesterday's
 			// note over the desktop's newer one.
 			staleShas: (id) => state.entries[id]?.shaHistory,
+			// "The local file is gone" only means "the user deleted it" when
+			// the previous round actually saw it. Otherwise the disappearance is
+			// unexplained (an incomplete vault listing, a failed write, an
+			// external tool) and nothing may be deleted on either side.
+			//
+			// RS compares `prevSync` against the CURRENT remote to decide this;
+			// here the equivalent evidence is "we observed the file at the end
+			// of the last round", which is exactly what `lastSeenAt` records.
+			isDeletionExplained: (id) => {
+				const e = state.entries[id];
+				if (!e) return false;
+				if (localSnap.massDeletion) return false;
+				return e.lastSeenAt !== undefined;
+			},
 		});
 	let actions = planActions();
 	tr.phase(
@@ -473,6 +491,18 @@ export async function runSync(
 	}
 
 	// 7. bookkeeping
+	// Record which local files were actually observed this round, so the NEXT
+	// round can tell "the user deleted it" from "the listing did not mention
+	// it". Written for every entry whose file was seen, and never cleared on
+	// a round that did not look at it (an unevaluated entry keeps its last
+	// observation instead of losing the evidence).
+	for (const [id, seen] of localSnap.seenNow) {
+		const e = state.entries[id];
+		if (!e) continue;
+		e.lastSeenMtime = seen.mtime;
+		e.lastSeenSize = seen.size;
+		e.lastSeenAt = now;
+	}
 	if (remoteSnap.auditDue) state.lastFullAudit = now;
 	state.renameHints = (state.renameHints ?? []).slice(hintCount);
 	state.lastSyncAt = now;

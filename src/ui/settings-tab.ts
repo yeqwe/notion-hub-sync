@@ -355,6 +355,21 @@ export class NotionHubSettingTab extends PluginSettingTab {
 			},
 		);
 
+		// The structural scan runs every round now; this switch is the escape
+		// hatch for a phone on a metered connection. Off means "trust the
+		// journal and the search index", i.e. the pre-0.5.0 behaviour — with
+		// its known blind spot: a page deleted outside the journal stays
+		// invisible until the fallback walk runs.
+		this.toggle(
+			containerEl,
+			strings.settingsScanEveryRound,
+			strings.settingsScanEveryRoundDescription,
+			() => st.scanStructureEveryRound,
+			(v) => {
+				st.scanStructureEveryRound = v;
+			},
+		);
+
 		// ── .obsidian config sync ────────────────────────────
 		addSection(containerEl, strings.settingsConfigSync);
 

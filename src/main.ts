@@ -409,6 +409,7 @@ export default class NotionHubSyncPlugin extends Plugin {
 			isMobile: Platform.isMobile,
 			engine: {
 				fullAuditHours: this.settings.fullAuditHours,
+				scanStructureEveryRound: this.settings.scanStructureEveryRound,
 				roundRobinPerRound: ROUND_ROBIN_PER_ROUND,
 				maxFileSizeMB: this.settings.maxFileSizeMB,
 				deleteGuardThreshold: this.settings.deleteGuardThreshold,

@@ -73,6 +73,16 @@ export interface PlanInput {
 	 * that as a local edit is what makes a phone that slept through a day of
 	 * work push the OLD version back up and erase the desktop's newer one. */
 	staleShas?: (id: string) => readonly string[] | undefined;
+	/** True when the entry's local disappearance is EXPLAINED: the file was
+	 * present at the end of the last round with exactly the mtime+size the
+	 * base records, and is gone now. Anything else (never seen, recorded
+	 * state disagrees, listing looked incomplete) means "we cannot say the
+	 * user deleted this" and no deletion is propagated.
+	 *
+	 * This is the `prevSync == current` check Remotely Save performs before it
+	 * will propagate a deletion, and it is what stops a half-loaded mobile
+	 * vault index from wiping pages in Notion. */
+	isDeletionExplained?: (id: string) => boolean;
 }
 
 export type Action =

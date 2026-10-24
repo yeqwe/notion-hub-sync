@@ -439,6 +439,15 @@ export function plan(input: PlanInput): Action[] {
 			continue;
 		}
 		if (le.deleted) {
+			// The local file is gone. Before deleting anything remotely, prove
+			// that its disappearance is explained (RS's `prevSync == current`
+			// check): the file was there last round, unchanged, and is gone
+			// now. An unexplained disappearance is a listing that missed it or
+			// a failed write — deleting the remote copy would destroy the only
+			// remaining one.
+			if (!(input.isDeletionExplained?.(id) ?? true)) {
+				continue; // no action: leave both sides alone this round
+			}
 			if (re.changed) {
 				contents.push({ type: "restoreLocal", id });
 			} else if (isFolder && stillNeeded.has(`id:${id}`)) {
