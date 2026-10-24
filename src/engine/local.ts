@@ -279,7 +279,7 @@ export async function snapshotLocal(
 		// an entry created by this very round (pushNew) would otherwise carry
 		// no evidence until a second round ran, and its first legitimate
 		// deletion would be refused.
-		e.lastSeenMtime = f.mtime ?? 0;
+		e.lastSeenMtime = Math.round(f.mtime ?? 0);
 		e.lastSeenSize = f.size;
 		e.lastSeenAt = Date.now();
 		const baseSha = e.srcSha ?? e.localHash ?? e.fileSha ?? null;
@@ -289,6 +289,12 @@ export async function snapshotLocal(
 			baseSha !== null;
 		if (reuse) {
 			reused++;
+			// Correct a base written by an older version (a fractional mtime
+			// from the adapter). `sameStat` already treats it as unchanged, so
+			// this is not a behaviour change — it stops the record from staying
+			// non-integral forever.
+			e.localMtime = Math.round(f.mtime ?? 0);
+			e.localSize = f.size;
 		} else {
 			hashed++;
 			debug?.(`hash ${p} (mtime/size changed or no base sha)`);

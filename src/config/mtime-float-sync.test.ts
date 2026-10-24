@@ -1,26 +1,24 @@
-// 端到端：base 里存的是「整数 mtime + 浮点磁盘值」时，不能每轮重读重传。
+// 端到端：base 里存的是整数、磁盘 stat 返回浮点时，不能每轮重读重传。
 //
-// 这条路径在真实 vault 上踩过：Windows 的 adapter.stat() 返回
-// `1792825000985.459`，base 存成 `1792825000985`，`===` 永远不成立。
-// 后果不是"慢一点"——本地 sha 每轮重算，而远端未评估时 planner 会把它
-// 判成 pushContent，于是同一个文件被反复上传。
+// 现场症状（用户 vault，2965 条目）：
+//   sync-state.json 里 app.json 的 localMtime = 1792825000985
+//   磁盘上的实际值                  = 1792825000985.459
+//
+// Obsidian 的 `adapter.stat()` 在 Windows 上返回带小数的毫秒，而 base
+// 用 `===` 比较 → 永远不成立 → 每轮重读重算 sha；远端本轮未评估时
+// planner 还会判成 pushContent，于是反复上传。
+//
+// `NodeConfigIO` 直接返回 `mtimeMs`，本身就是浮点（实测
+// `1792832994045.6074`），所以这个测试**不需要伪造**任何 stat：
+// 第一轮 `statMtime()` 把整数写进 base，后续轮次比较的就是
+// 「整数 base vs 浮点磁盘」，正是现场那个组合。
 
 import { describe, expect, it } from "vitest";
 import { writeFileSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { FakeNotion } from "../../test-support/fake-notion";
-import { makeDevice, type Device } from "../../test-support/device";
-import { defaultConfigSync } from "../config/filter";
-
-/** A ConfigIO whose stat() reports fractional mtimes, like Obsidian on Windows. */
-function floatyConfigIO(d: Device) {
-	const io = d.deps.configIO!;
-	const orig = io.stat.bind(io);
-	(io as { stat: typeof orig }).stat = async (p: string) => {
-		const st = await orig(p);
-		return st ? { size: st.size, mtime: st.mtime + 0.459 } : null;
-	};
-}
+import { makeDevice } from "../../test-support/device";
+import { defaultConfigSync } from "./filter";
 
 describe("浮点 mtime 不制造重复同步", () => {
 	it("配置同步：base 整数 / 磁盘浮点 → 不产生 action", async () => {
@@ -33,33 +31,38 @@ describe("浮点 mtime 不制造重复同步", () => {
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "main.js"), "x".repeat(1000));
 
-		// 第一轮：写入 base（此时 IO 还是正常的整数）
+		// 第一轮：写入 base
 		await a.sync();
 		const rel = "plugins/p0/main.js";
-		expect(a.state.config?.[rel]).toBeDefined();
-		// 模拟旧版本写下的记录：磁盘是浮点，base 是整数
-		floatyConfigIO(a);
+		const base = a.state.config?.[rel];
+		expect(base).toBeDefined();
+		// base 必须是整数 —— 这就是 `statMtime()` 的职责
+		expect(Number.isInteger(base!.localMtime)).toBe(true);
+		// 而磁盘那边确实是浮点（Node 的 mtimeMs 精度远高于 1ms）
+		const diskStat = await a.deps.configIO!.stat(rel);
+		expect(diskStat).not.toBeNull();
+		expect(Number.isInteger(diskStat!.mtime)).toBe(false);
 
 		// 后续几轮：不得重读、不得重传
+		const io = a.deps.configIO!;
 		for (let i = 0; i < 3; i++) {
 			const reads: string[] = [];
-			const io = a.deps.configIO!;
-			const orig = io.readBinary.bind(io);
-			(io as { readBinary: typeof orig }).readBinary = async (p: string) => {
+			const realRead = io.readBinary.bind(io);
+			(io as { readBinary: typeof realRead }).readBinary = async (
+				p: string,
+			) => {
 				reads.push(p);
-				return orig(p);
+				return realRead(p);
 			};
 			fake.reqLog.length = 0;
 			const r = await a.sync();
-			(io as { readBinary: typeof orig }).readBinary = orig;
-			console.log(
-				`round ${i}: reads=${JSON.stringify(reads)} updated=${r.updated} ` +
-					`baseMtime=${a.state.config?.[rel]?.localMtime}`,
-			);
-			expect(reads).not.toContain(rel);
-			expect(r.updated).toBe(0);
+			(io as { readBinary: typeof realRead }).readBinary = realRead;
+
+			expect(reads, `round ${i}`).not.toContain(rel);
+			expect(r.updated, `round ${i}`).toBe(0);
 			expect(
 				fake.reqLog.filter((q) => q.path.includes("file_uploads")),
+				`round ${i}`,
 			).toHaveLength(0);
 		}
 	});
@@ -75,37 +78,38 @@ describe("浮点 mtime 不制造重复同步", () => {
 		writeFileSync(join(dir, "main.js"), "x".repeat(1000));
 		await a.sync();
 		await b.sync();
-		floatyConfigIO(a);
 
 		writeFileSync(join(dir, "main.js"), "y".repeat(2000));
 		const r = await a.sync();
 		expect(r.failed).toBe(0);
 		await b.sync();
-		expect(
-			b.read(".obsidian/plugins/p0/main.js").length,
-		).toBe(2000);
+		expect(b.read(".obsidian/plugins/p0/main.js").length).toBe(2000);
 	});
 
-	it("笔记同步：本地未改动的文件不会被当成 changed", async () => {
+	it("笔记同步：base 存了浮点 mtime 时，本地未改动的文件不会被当成 changed", async () => {
 		const fake = new FakeNotion();
 		const rootId = fake.humanCreatePage("", "root");
 		const a = makeDevice(fake, rootId, "a");
-		const p = join(a.dir, "N.md");
-		writeFileSync(p, "hello\n");
+		writeFileSync(join(a.dir, "N.md"), "hello\n");
 		await a.sync();
 		await a.sync();
 
-		// 账本里的 mtime 现在与磁盘一致；把它改成"旧版本写下的整数"
+		// 旧版本可能把 adapter 的浮点值写进了 base。模拟那份记录：
+		// 磁盘/列表仍是整数，账本多一个小数（同一毫秒，取整后不变）。
 		const id = Object.keys(a.state.entries)[0]!;
 		const e = a.state.entries[id]!;
-		e.localMtime = Math.round(e.localMtime ?? 0) + 0.459;
+		expect(Number.isInteger(e.localMtime)).toBe(true);
+		e.localMtime = e.localMtime! + 0.1;
 
 		fake.reqLog.length = 0;
 		const r = await a.sync();
 		expect(r.updated).toBe(0);
 		expect(
-			fake.reqLog.filter((q) => q.method === "PATCH" && q.path.includes("markdown")),
+			fake.reqLog.filter(
+				(q) => q.method === "PATCH" && q.path.includes("markdown"),
+			),
 		).toHaveLength(0);
-		void dirname;
+		// 而且账本被顺手纠正成整数，下一轮开始就是干净比较
+		expect(Number.isInteger(a.state.entries[id]!.localMtime)).toBe(true);
 	});
 });
