@@ -133,6 +133,10 @@ export class ObsidianVaultIO implements VaultIO {
 				throw new WriteVerificationError(path, expectedSha, actual);
 			}
 		} finally {
+			// The tmp CREATE consumed the expectation registered above; the
+			// DELETE about to fire needs its own, or the vault-event listener
+			// reads it as a user change and schedules another round.
+			this.writes.expect(tmp, tmp);
 			await this.app.vault.adapter.remove(tmp).catch(() => undefined);
 		}
 		// Verified. Only now may the target change — a failure above leaves

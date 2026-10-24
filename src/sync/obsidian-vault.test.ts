@@ -2,7 +2,13 @@
 // an unreadable one used to be indistinguishable from "first run".
 
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import {
+	mkdtempSync,
+	readFileSync,
+	unlinkSync,
+	writeFileSync,
+	existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +18,7 @@ import {
 	saveState,
 } from "./obsidian-vault";
 import { emptyState } from "./state";
+import { sha256Hex } from "./hashes";
 import type { App } from "obsidian";
 
 const ROOT = "40162671-1556-8043-a96b-ff36b3f3d90a";
@@ -152,5 +159,65 @@ describe("ObsidianVaultIO.exists", () => {
 		const io = new ObsidianVaultIO(indexApp(dir, new Set(["a.md"])));
 		expect(await io.exists("a.md")).toBe(true);
 		expect(await io.exists("b.md")).toBe(false);
+	});
+});
+
+describe("ObsidianVaultIO.writeTextVerified tmp lifecycle", () => {
+	// The tmp file fires TWO vault events: CREATE then DELETE. Each needs
+	// its own `writes` expectation — when only the CREATE was covered, the
+	// DELETE looked like a user change and scheduled a spurious round.
+	it("covers both the tmp create and the tmp delete events", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "nhs-wv-"));
+		const abs = (p: string) => join(dir, ...p.split("/").filter(Boolean));
+		const seen: { create?: boolean; del?: boolean } = {};
+		let io!: ObsidianVaultIO;
+		const app = {
+			vault: {
+				getAbstractFileByPath: (p: string) =>
+					existsSync(abs(p))
+						? {
+								path: p,
+								extension: "md",
+								stat: { size: 1, mtime: 1 },
+							}
+						: null,
+				createBinary: async (p: string, data: ArrayBuffer) => {
+					writeFileSync(abs(p), new Uint8Array(data));
+					if (p.endsWith(".nhs-tmp"))
+						seen.create = io.writes.consume(p, p);
+				},
+				modifyBinary: async (
+					f: { path: string },
+					data: ArrayBuffer,
+				) => {
+					writeFileSync(abs(f.path), new Uint8Array(data));
+				},
+				adapter: {
+					exists: async (p: string) => existsSync(abs(p)),
+					readBinary: async (p: string) => {
+						const b = readFileSync(abs(p));
+						return b.buffer.slice(
+							b.byteOffset,
+							b.byteOffset + b.byteLength,
+						);
+					},
+					remove: async (p: string) => {
+						if (p.endsWith(".nhs-tmp"))
+							seen.del = io.writes.consume(p, p);
+						unlinkSync(abs(p));
+					},
+				},
+			},
+		} as unknown as App;
+		io = new ObsidianVaultIO(app);
+
+		const body = new TextEncoder().encode("verified body");
+		const sha = await sha256Hex(body);
+		await io.writeTextVerified("a.md", "verified body", sha);
+
+		expect(seen.create).toBe(true);
+		expect(seen.del).toBe(true);
+		expect(fmt(dir).exists("a.md.nhs-tmp")).toBe(false);
+		expect(readFileSync(join(dir, "a.md"), "utf8")).toBe("verified body");
 	});
 });

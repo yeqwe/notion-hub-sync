@@ -54,6 +54,10 @@ export interface VaultIO {
 
 /** Hidden/config paths are never synced. */
 export function isSyncablePath(path: string): boolean {
+	// A `.nhs-tmp` leftover (the OS killed the app between the verified
+	// write's staging and cleanup) is ours, not user content — it must
+	// never be listed, pushed as a 📎 file, or treated as a user event.
+	if (path.endsWith(".nhs-tmp")) return false;
 	return !path.split("/").some((seg) => seg.startsWith("."));
 }
 
