@@ -25,7 +25,9 @@ import { describe, expect, it } from "vitest";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { FakeNotion } from "../../test-support/fake-notion";
-import { makeDevice, type Device } from "../../test-support/device";
+import { fileExists, makeDevice, type Device } from "../../test-support/device";
+
+const has = (d: Device, p: string): boolean => fileExists(d, p);
 
 function setup() {
 	const fake = new FakeNotion();
@@ -90,7 +92,7 @@ describe("empty folders", () => {
 		// with "archived ancestor" and retry forever
 		expect(r.failures).toEqual([]);
 		expect(tree(a)).toEqual([]);
-		expect(Object.keys(a.state.entries)).toEqual([]);
+		expect(Object.keys(a.state.entries).sort()).toEqual([]);
 		expect(titled(fake, "Big")).toEqual([]);
 		expect(idle(await a.sync())).toBe(true);
 	});
@@ -144,8 +146,8 @@ describe("empty folders", () => {
 		expect(titled(fake, "Con").length).toBe(1);
 		expect(Object.keys(a.state.entries).length).toBe(1);
 		expect(Object.keys(b.state.entries).length).toBe(1);
-		expect(Object.keys(a.state.entries)).toEqual(
-			Object.keys(b.state.entries),
+		expect(Object.keys(a.state.entries).sort()).toEqual(
+			Object.keys(b.state.entries).sort(),
 		);
 
         // one file inside -> exactly one page, not two
@@ -172,7 +174,7 @@ describe("empty folders", () => {
 		// leftover duplicate
 		expect(r.failures).toEqual([]);
 		expect(tree(a)).toEqual([]);
-		expect(Object.keys(a.state.entries)).toEqual([]);
+		expect(Object.keys(a.state.entries).sort()).toEqual([]);
 		expect(titled(fake, "F")).toEqual([]);
 		expect(idle(await a.sync())).toBe(true);
 	});
@@ -336,5 +338,64 @@ describe("empty folders", () => {
 		expect(kinds.sort()).toEqual(["folder", "note"]);
 		expect(tree(b)).toEqual(["Dir.md", "Dir/"]);
 		expect(idle(await b.sync())).toBe(true);
+	});
+});
+
+
+describe("duplicate folder page with children", () => {
+	const hexId = (id: string) => id.replace(/-/g, "").toLowerCase();
+	const pageOf = (f: FakeNotion, id: string) => f.pages.get(hexId(id))!;
+
+	it("trashing the loser moves its child pages to the survivor first", async () => {
+		// The incident: the phone made folder page B `已学`; the desktop made
+		// its own `已学` page A and pushed a note under it. Trashing the
+		// duplicate took the whole subtree — note included — and the next
+		// round trashed the local file everywhere.
+		//
+		// Deterministic: fake ids are sequential, so B (created first) is the
+		// smaller id and A always loses. B is hidden from /search while a
+		// builds A with the note under it, so a mints its own page instead of
+		// linking B's.
+		const { fake, a, b } = setup();
+
+		mkdirSync(join(b.dir, "D"));
+		await b.sync();
+		const pageB = Object.entries(b.state.entries).find(
+			([, e]) => e.path === "D",
+		)![0];
+
+		fake.searchHidden.add(pageB);
+		mkdirSync(join(a.dir, "D"));
+		a.write("D/note.md", "precious\n");
+		await a.sync();
+		const entryA = Object.entries(a.state.entries).find(
+			([, e]) => e.path === "D",
+		)![0];
+		const noteId = Object.entries(a.state.entries).find(
+			([, e]) => e.path === "D/note.md",
+		)![0];
+		expect(pageOf(fake, noteId).parentId).toBe(entryA);
+
+		fake.searchHidden.delete(pageB);
+		const r = await a.sync();
+		expect(r.failures).toEqual([]);
+
+		// A is trashed — but the note went to B first, not with it.
+		expect(pageOf(fake, entryA).inTrash).toBe(true);
+		expect(pageOf(fake, noteId).inTrash).toBe(false);
+		expect(pageOf(fake, noteId).parentId).toBe(pageB);
+		expect(titled(fake, "D").length).toBe(1);
+		expect(has(a, "D/note.md")).toBe(true);
+		expect(a.state.entries[noteId]?.parentId).toBe(pageB);
+
+		// b sees the same outcome through the journal: one folder page, the
+		// note pulled under it — and it must not be trashed locally either.
+		const rb = await b.sync();
+		expect(rb.failures).toEqual([]);
+		expect(has(b, "D/note.md")).toBe(true);
+		expect(tree(b)).toEqual(["D/", "D/note.md"]);
+		expect(Object.keys(a.state.entries).sort()).toEqual(
+			Object.keys(b.state.entries).sort(),
+		);
 	});
 });

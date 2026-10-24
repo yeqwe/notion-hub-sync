@@ -523,3 +523,109 @@ describe("plan: ordering", () => {
 		);
 	});
 });
+
+describe("plan: duplicate trashes carry mergeInto", () => {
+	// Trashing a duplicate page archives its whole subtree in Notion. Every
+	// duplicate trash with a surviving twin must name that twin so apply can
+	// move the child pages there FIRST; the one case with no survivor (the
+	// user deleted the place) gets none.
+	const fbase = (id: string, name = "D"): BaseNode =>
+		b(id, "folder", "root", name, null);
+	const fside = (name = "D"): Side => side(P("root"), name, null);
+	const fra = (id: string, name = "D"): RemoteAdded => ({
+		id,
+		kind: "folder",
+		parent: P("root"),
+		name,
+		sha: null,
+	});
+	const trashOf = (acts: Action[], id: string) =>
+		acts.find((a) => a.type === "trashRemote" && a.id === id);
+
+	it("base id wins + base still alive remotely → newcomer trashed into base", () => {
+		const acts = plan(
+			input({
+				base: { aa: fbase("aa") },
+				local: { aa: fside() },
+				remote: { aa: fside() },
+				remoteAdded: [fra("zz")],
+			}),
+		);
+		expect(trashOf(acts, "zz")).toEqual({
+			type: "trashRemote",
+			id: "zz",
+			mergeInto: "aa",
+		});
+	});
+
+	it("base id wins but its remote copy is unknown/gone → base trashed into newcomer", () => {
+		// `remote` says nothing about `aa` (not evaluated this round): the
+		// page may well be alive with children — the merge still must name
+		// the survivor `zz`.
+		const acts = plan(
+			input({
+				base: { aa: fbase("aa") },
+				local: { aa: fside() },
+				remote: {},
+				remoteAdded: [fra("zz")],
+			}),
+		);
+		expect(trashOf(acts, "aa")).toEqual({
+			type: "trashRemote",
+			id: "aa",
+			mergeInto: "zz",
+		});
+	});
+
+	it("newcomer id wins → base trashed into the newcomer", () => {
+		const acts = plan(
+			input({
+				base: { zz: fbase("zz") },
+				local: { zz: fside() },
+				remote: { zz: fside() },
+				remoteAdded: [fra("aa")],
+			}),
+		);
+		expect(trashOf(acts, "zz")).toEqual({
+			type: "trashRemote",
+			id: "zz",
+			mergeInto: "aa",
+		});
+	});
+
+	it("a place the user deleted has no survivor → plain trashRemote", () => {
+		const acts = plan(
+			input({
+				base: { aa: fbase("aa") },
+				local: { aa: DEL },
+				remote: { aa: fside() }, // leftover remote copy still alive
+				remoteAdded: [fra("zz")],
+			}),
+		);
+		expect(trashOf(acts, "zz")).toEqual({ type: "trashRemote", id: "zz" });
+	});
+
+	it("two base entries claiming one place → loser trashed into the winner", () => {
+		const acts = plan(
+			input({
+				base: {
+					aa: b("aa", "note", "root", "n.md"),
+					bb: b("bb", "note", "root", "n.md"),
+				},
+				local: {
+					aa: side(P("root"), "n.md"),
+					bb: side(P("root"), "n.md"),
+				},
+				remote: {
+					aa: side(P("root"), "n.md"),
+					bb: side(P("root"), "n.md"),
+				},
+			}),
+		);
+		expect(trashOf(acts, "bb")).toEqual({
+			type: "trashRemote",
+			id: "bb",
+			mergeInto: "aa",
+		});
+	});
+});

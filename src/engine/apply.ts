@@ -23,7 +23,7 @@ import {
 	makeLinks,
 } from "../sync/push";
 import { fetchNoteContent, fetchFileContent, RemoteTooLargeError } from "../sync/pull";
-import { getPage } from "./remote-audit";
+import { getPage, hex } from "./remote-audit";
 import { safeRecordVersion } from "../sync/history";
 import { Semaphore } from "../sync/pool";
 import { merge3Text } from "./merge3";
@@ -630,6 +630,63 @@ function depthBatches(ctx: ApplyCtx, list: Action[]): Action[][] {
 	return out;
 }
 
+/** Move every child page of `doomedId` under `survivorId` before the
+ * trash takes the whole subtree down, repoint the matching base entries,
+ * and journal each move so the other devices re-evaluate those children.
+ * Returns the number of moved pages. A listing that says the page is
+ * already gone skips the merge (nothing to save); a child page that is
+ * already archived is skipped the same way. ANY other failure throws —
+ * the caller must not trash a page whose children it failed to move. */
+async function mergeChildrenInto(
+	ctx: ApplyCtx,
+	doomedId: string,
+	survivorId: string,
+): Promise<number> {
+	const deps = ctx.deps;
+	const state = deps.state;
+	const children: string[] = [];
+	try {
+		let cursor: string | undefined;
+		for (;;) {
+			const res = await deps.client.request<{
+				results?: Array<{ id: string; type: string }>;
+				has_more?: boolean;
+				next_cursor?: string | null;
+			}>(
+				"GET",
+				`/blocks/${doomedId}/children?page_size=100${cursor ? `&start_cursor=${cursor}` : ""}`,
+			);
+			for (const b of res.results ?? []) {
+				if (b.type === "child_page") children.push(hex(b.id));
+			}
+			if (!res.has_more || !res.next_cursor) break;
+			cursor = res.next_cursor;
+		}
+	} catch (err) {
+		if (isAlreadyGone(err)) return 0;
+		throw err;
+	}
+	let moved = 0;
+	for (const childHex of children) {
+		try {
+			await deps.client.request("POST", `/pages/${childHex}/move`, {
+				parent: { type: "page_id", page_id: survivorId },
+			});
+		} catch (err) {
+			// The child is already gone — nothing to save for it.
+			if (isAlreadyGone(err)) continue;
+			throw err;
+		}
+		const e = state.entries[childHex];
+		if (e && hex(e.parentId) === hex(doomedId)) {
+			e.parentId = survivorId;
+		}
+		ctx.journalOps.push({ o: "m", id: childHex });
+		moved++;
+	}
+	return moved;
+}
+
 /** The page is already archived, or was swallowed by a trashed ancestor.
  * Both mean "it is not there any more" — the goal of a trash — so the
  * caller can drop its base entry instead of retrying. */
@@ -1020,6 +1077,24 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 			break;
 		}
 		case "trashRemote": {
+			if (action.mergeInto !== undefined) {
+				// Trashing a page archives its whole subtree with it. Rescue
+				// the child pages into the surviving duplicate first — a
+				// child we fail to move must stop the trash, not die with it.
+				const survivor =
+					ctx.recreated.get(hex(action.mergeInto)) ??
+					action.mergeInto;
+				const movedChildren = await mergeChildrenInto(
+					ctx,
+					action.id,
+					survivor,
+				);
+				if (movedChildren > 0) {
+					deps.log?.(
+						`trashRemote ${state.entries[action.id]?.path ?? action.id}: moved ${movedChildren} child page(s) to the surviving duplicate first`,
+					);
+				}
+			}
 			const base = await ctx.baseStore.get(action.id);
 			if (base !== null) {
 				await safeRecordVersion(

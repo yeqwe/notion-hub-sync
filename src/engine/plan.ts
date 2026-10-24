@@ -35,9 +35,9 @@ function duplicateAt(
 	local: Record<string, Side>,
 	remote: Record<string, Side>,
 	skip?: Set<string>,
-): { dead: string[]; alive: string[] } {
+): { dead: string[]; alive: Array<{ id: string; winner: string }> } {
 	const dead: string[] = [];
-	const alive: string[] = [];
+	const alive: Array<{ id: string; winner: string }> = [];
 	const groups = new Map<string, string[]>();
 	for (const [id, b] of Object.entries(base)) {
 		if (skip?.has(id)) continue;
@@ -58,7 +58,7 @@ function duplicateAt(
 		for (const id of ids) {
 			if (id === winner) continue;
 			if (remote[id]?.deleted === true) dead.push(id);
-			else alive.push(id);
+			else alive.push({ id, winner });
 		}
 	}
 	return { dead, alive };
@@ -271,7 +271,7 @@ export function plan(input: PlanInput): Action[] {
 	//    device rebuild it, and the two never converge.
 	//
 	// Neither case may fall through to createLocalFolder/pullNew.
-	const duplicatePages: string[] = [];
+	const duplicatePages: Array<{ id: string; mergeInto?: string }> = [];
 	for (const r of remoteAdded) {
 		if (matchedRemote.has(r.id)) continue;
 		const key = `${parentKey(r.parent)}\u0000${r.name}`;
@@ -282,8 +282,9 @@ export function plan(input: PlanInput): Action[] {
 				// the remote entry this device knew is being trashed this round
 				const stillRemote = remote[baseId]?.deleted !== true;
 				if (stillRemote) {
-					// leftover duplicate of a place the user just deleted
-					duplicatePages.push(r.id);
+					// leftover duplicate of a place the user just deleted —
+					// no surviving twin to merge its children into.
+					duplicatePages.push({ id: r.id });
 					continue;
 				}
 				// The remote copy is gone as well: this page is the re-creation
@@ -323,10 +324,10 @@ export function plan(input: PlanInput): Action[] {
 						localPath: pathOf(le.parent, le.name),
 						kind: base[baseId]!.kind,
 					});
-					duplicatePages.push(baseId);
+					duplicatePages.push({ id: baseId, mergeInto: r.id });
 					continue;
 				}
-				duplicatePages.push(r.id);
+				duplicatePages.push({ id: r.id, mergeInto: baseId });
 			} else {
 				// the remote page wins: bind the local path to it, and retire
 				// the base entry (trashRemote removes it). link runs before
@@ -337,7 +338,7 @@ export function plan(input: PlanInput): Action[] {
 					localPath: pathOf(le.parent, le.name),
 					kind: base[baseId]!.kind,
 				});
-				duplicatePages.push(baseId);
+				duplicatePages.push({ id: baseId, mergeInto: r.id });
 			}
 			continue;
 		}
@@ -390,7 +391,11 @@ export function plan(input: PlanInput): Action[] {
 	// a dead duplicate's page is gone: drop the entry. An alive one is a real
 	// second page → trash it (its twin keeps the place).
 	const dupForgets: Action[] = dups.dead.map((id) => ({ type: "forget", id }));
-	const dupTrashes = dups.alive.map((id) => ({ type: "trashRemote" as const, id }));
+	const dupTrashes = dups.alive.map(({ id, winner }) => ({
+		type: "trashRemote" as const,
+		id,
+		mergeInto: winner,
+	}));
 
 	// ----- per-id decision -----
 	const moves: Action[] = [];
@@ -420,7 +425,11 @@ export function plan(input: PlanInput): Action[] {
 		adoptable.set(key, "");
 	}
 	for (const r of remoteAdded) {
-		if (matchedRemote.has(r.id) || duplicatePages.includes(r.id)) continue;
+		if (
+			matchedRemote.has(r.id) ||
+			duplicatePages.some((d) => d.id === r.id)
+		)
+			continue;
 		const key = `${parentKey(r.parent)}\u0000${r.name}`;
 		if (!adoptable.has(key)) continue;
 		if (adoptable.get(key) === "") adoptable.set(key, r.id);
@@ -432,7 +441,8 @@ export function plan(input: PlanInput): Action[] {
 		const { le, re } = evals.get(id)!;
 		const isFolder = b.kind === "folder";
 
-		if (dups.dead.includes(id) || dups.alive.includes(id)) continue;
+		if (dups.dead.includes(id) || dups.alive.some((d) => d.id === id))
+			continue;
 
 		if (le.deleted && re.deleted) {
 			forgets.push({ type: "forget", id });
@@ -590,10 +600,19 @@ export function plan(input: PlanInput): Action[] {
 			.map((t) => ("id" in t.action ? t.action.id : null))
 			.filter((id): id is string => id !== null),
 	);
-	for (const id of duplicatePages) {
-		if (queued.has(id)) continue;
-		queued.add(id);
-		trashes.push({ action: { type: "trashRemote", id }, depth: 0 });
+	for (const d of duplicatePages) {
+		if (queued.has(d.id)) continue;
+		queued.add(d.id);
+		trashes.push({
+			action: {
+				type: "trashRemote",
+				id: d.id,
+				...(d.mergeInto !== undefined
+					? { mergeInto: d.mergeInto }
+					: {}),
+			},
+			depth: 0,
+		});
 	}
 	trashes.sort((x, y) => y.depth - x.depth);
 

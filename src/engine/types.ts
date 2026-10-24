@@ -103,7 +103,14 @@ export type Action =
 	| { type: "localConflictCopy"; localPath: string; conflictsWith: string }
 	| { type: "moveRemote"; id: string; parent: ParentRef; name: string }
 	| { type: "moveLocal"; id: string; parent: ParentRef; name: string }
-	| { type: "trashRemote"; id: string }
+	| {
+			type: "trashRemote";
+			id: string;
+			/** a duplicate of `mergeInto`: its child pages are moved there
+			 * before the trash, because trashing a page in Notion takes its
+			 * whole subtree with it. */
+			mergeInto?: string;
+	  }
 	| { type: "trashLocal"; id: string }
 	/** Re-create a page whose remote copy is gone. `adopt` names an existing
 	 * unclaimed page at the same place: reusing it (instead of creating yet

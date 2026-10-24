@@ -333,7 +333,13 @@ export class FakeNotion {
 				}
 				if (method === "PATCH") {
 					this.assertEditable(p);
-					if (body.in_trash === true) p.inTrash = true;
+					if (body.in_trash === true) {
+						// real Notion trashes the whole subtree with the page
+						for (const q of this.pages.values()) {
+							if (q === p || this.hasAncestor(q, p.id))
+								q.inTrash = true;
+						}
+					}
 					if (body.in_trash === false) p.inTrash = false;
 					const t = (
 						(body.properties as Record<string, unknown>)?.title as {
