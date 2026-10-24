@@ -319,12 +319,36 @@ export async function runSync(
 			//
 			// RS compares `prevSync` against the CURRENT remote to decide this;
 			// here the equivalent evidence is "we observed the file at the end
-			// of the last round", which is exactly what `lastSeenAt` records.
+			// of the last round, in the state the base already knows" — which
+			// is what `lastSeenAt` + the recorded stat say together.
+			//
+			// "Seen" ALONE is too weak: a file last observed with edits that
+			// never reached Notion must not be read as "the user deleted it",
+			// because trashing the page would destroy the only remaining copy
+			// of that work. `localMtime` is the stat of the bytes the base
+			// holds, so a mismatch means the file was last seen out of sync.
+			// Entries written by older versions may lack one side of that
+			// comparison; then the older, weaker answer stands.
 			isDeletionExplained: (id) => {
 				const e = state.entries[id];
 				if (!e) return false;
 				if (localSnap.massDeletion) return false;
-				return e.lastSeenAt !== undefined;
+				if (e.lastSeenAt === undefined) return false;
+				if (
+					(e.lastSeenMtime !== undefined &&
+						e.localMtime !== undefined &&
+						Math.round(e.lastSeenMtime) !==
+							Math.round(e.localMtime)) ||
+					(e.lastSeenSize !== undefined &&
+						e.localSize !== undefined &&
+						e.lastSeenSize !== e.localSize)
+				) {
+					tr.debug(
+						`deletion of ${e.path} not propagated: the file was last seen with unsynced changes — the remote copy is the only one left`,
+					);
+					return false;
+				}
+				return true;
 			},
 		});
 	let actions = planActions();

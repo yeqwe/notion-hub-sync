@@ -9,3 +9,6 @@ probe/out/
 .obsidian/
 *.log
 .DS_Store
+
+# 本地开发助手的工作记忆 / 会话数据
+.workbuddy/

@@ -43,12 +43,21 @@ const DEFAULT_LIMIT = 500;
 
 /** Fast path: same size AND same mtime ⇒ not modified, no hashing needed.
  * The reverse is not true (a touch without a write bumps mtime), and that
- * is acceptable here — this is a hint list, and the engine re-hashes. */
+ * is acceptable here — this is a hint list, and the engine re-hashes.
+ *
+ * Compared ROUNDED, because that is what the base stores: the engine writes
+ * `Math.round(mtime)` (Windows adapters report fractional milliseconds while
+ * `TFile.stat` reports integers) and `sameStat` compares the same way. A
+ * raw `!==` here marked EVERY file as modified on those platforms — the
+ * panel said "changes pending" forever while the engine saw nothing to do. */
 function looksModified(entry: SyncEntry, f: LocalFileInfo): boolean {
 	if (entry.localMtime === undefined || entry.localSize === undefined) {
 		return true;
 	}
-	return entry.localMtime !== f.mtime || entry.localSize !== f.size;
+	return (
+		Math.round(entry.localMtime) !== Math.round(f.mtime) ||
+		entry.localSize !== f.size
+	);
 }
 
 export function scanPendingChanges(input: ScanChangesInput): PendingChange[] {

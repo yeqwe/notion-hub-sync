@@ -307,6 +307,21 @@ export async function snapshotLocal(
 					tick(f.path);
 					return s;
 				});
+		// The stat moved but the CONTENT did not (a `touch`, Obsidian
+		// re-saving identical bytes, an external tool rewriting the file).
+		// Record the stat that belongs to the bytes the base holds, otherwise
+		// this file is re-read and re-hashed on EVERY round — and the base's
+		// `localMtime` stops meaning anything, which is what the deletion
+		// check needs it to mean.
+		if (
+			!reuse &&
+			baseSha !== null &&
+			sha === baseSha &&
+			f.mtime !== undefined
+		) {
+			e.localMtime = Math.round(f.mtime);
+			e.localSize = f.size;
+		}
 		local[id] = {
 			deleted: false,
 			parent: parentRefForChild(parentDir(p)),

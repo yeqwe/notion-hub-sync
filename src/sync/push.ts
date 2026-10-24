@@ -51,11 +51,31 @@ function droppedLinkTargets(text: string): string[] {
 }
 
 export function makeLinks(deps: SyncDeps): LinkResolver {
+	// One path→pageId index per resolver, not one full-table scan per link.
+	//
+	// `entryByPath` walks every entry: a note with 50 links used to do
+	// 50 × N string comparisons on EVERY push of that note. Hits come from a
+	// snapshot built on first use; a MISS falls back to the table, because a
+	// page created earlier in the same run (the bootstrap path) is not in the
+	// snapshot — a stale index must never hide a live entry, and a link that
+	// resolves to nothing is a link the remote note loses.
+	let index: Map<string, string> | null = null;
+	const idForPath = (path: string): string | null => {
+		if (index === null) {
+			index = new Map();
+			for (const [id, e] of Object.entries(deps.state.entries)) {
+				index.set(e.path, id);
+			}
+		}
+		const hit = index.get(path);
+		if (hit !== undefined) return hit;
+		return entryByPath(deps.state, path)?.pageId ?? null;
+	};
 	return {
 		pageIdForTarget: (target, sourcePath) => {
 			const p = deps.resolvePath(target, sourcePath);
 			if (!p) return null;
-			return entryByPath(deps.state, p)?.pageId ?? null;
+			return idForPath(p);
 		},
 		pathForPageId: (id) => {
 			const hex = id.replace(/-/g, "").toLowerCase();

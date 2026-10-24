@@ -78,4 +78,44 @@ describe("push defers when the remote moved under it", () => {
 		expect(rb.skipped).toBe(0);
 		expect(remoteMarkdown(fake, id)).toContain("phone version");
 	});
+	it("the push of an evaluated entry does not re-read the page", async () => {
+		const { a, b } = setup();
+		a.write("n.md", "v1\n");
+		await a.sync();
+		await b.sync(); // B pulls → its entry records the remote stamp
+		expect(b.state.entries[onlyId(b)]!.remoteEdited).toBeTruthy();
+
+		b.write("n.md", "v2\n");
+		// A full round evaluates every page, so "remote unchanged" is an
+		// OBSERVATION by the time the applier runs; re-reading the page there
+		// is one wasted request per pushed note (~30 s of budget per 100).
+		let phase = "";
+		const readsDuringApply: string[] = [];
+		b.deps.event = (ev) => {
+			if (ev.t === "phase") phase = ev.phase;
+		};
+		const orig = b.deps.client.request.bind(b.deps.client);
+		b.deps.client.request = (async (
+			method: "GET" | "POST" | "PATCH" | "DELETE",
+			path: string,
+			body?: unknown,
+		) => {
+			// the engine labels an apply group by what it does: pushes run
+			// under "upload", pulls under "download"
+			if (
+				(phase === "apply" ||
+					phase === "upload" ||
+					phase === "download") &&
+				method === "GET" &&
+				/^\/pages\/[0-9a-f]{32}$/.test(path)
+			) {
+				readsDuringApply.push(path);
+			}
+			return orig(method, path, body);
+		}) as typeof b.deps.client.request;
+
+		const r = await b.sync(true);
+		expect(r.updated).toBe(1);
+		expect(readsDuringApply).toEqual([]);
+	});
 });

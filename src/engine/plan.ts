@@ -151,7 +151,15 @@ export function plan(input: PlanInput): Action[] {
 	// before any rule runs, so no rule can emit an action for a path this
 	// device does not sync.
 	const skip = input.skipIds ?? new Set<string>();
-	const localAdded = input.localAdded.filter((a) => !skip.has(a.path));
+	// `skipIds` holds PAGE ids, so the old `skip.has(a.path)` here could
+	// never match anything — the real guard is `skipPath`, the same one the
+	// remote additions use (and the same reason: these items have no id this
+	// device knows, only a path).
+	const localAdded = input.skipPath
+		? input.localAdded.filter(
+				(a) => !input.skipPath!(a.path, a.kind === "folder"),
+			)
+		: input.localAdded;
 	// Remote additions have no id this device knows, so scope is tested on
 	// their reconstructed path instead (with the item's own shape: a folder
 	// has no extension and would otherwise read as "other").

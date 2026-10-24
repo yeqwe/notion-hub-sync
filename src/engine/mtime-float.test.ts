@@ -16,6 +16,10 @@
 // 这里只测纯函数。端到端行为见 `mtime-float-sync.test.ts`。
 
 import { describe, expect, it } from "vitest";
+import { statSync, utimesSync } from "node:fs";
+import { join } from "node:path";
+import { FakeNotion } from "../../test-support/fake-notion";
+import { makeDevice } from "../../test-support/device";
 import { sameStat } from "./local";
 import { normalizeStat } from "../config/config-io";
 
@@ -69,5 +73,31 @@ describe("mtime 比较不受浮点噪声影响", () => {
 			});
 		}
 		expect(normalizeStat(null)).toBeNull();
+	});
+});
+
+describe("touch（内容没变，只动 mtime）", () => {
+	it("base 的 localMtime 会跟上，不会每轮重读", async () => {
+		const fake = new FakeNotion();
+		const rootId = fake.humanCreatePage("", "root");
+		const a = makeDevice(fake, rootId, "a");
+		a.write("n.md", "same\n");
+		await a.sync();
+		const id = Object.keys(a.state.entries)[0]!;
+		const before = a.state.entries[id]!.localMtime;
+
+		// 同一份字节，只有 mtime 变了（touch / 编辑器重写相同内容）
+		const abs = join(a.dir, "n.md");
+		const stamped = new Date(2020, 0, 2, 3, 4, 5);
+		utimesSync(abs, stamped, stamped);
+
+		const r = await a.sync();
+		expect(r.failed).toBe(0);
+		expect(r.updated).toBe(0); // 内容没变 → 不该推送
+		// 记录下来的 mtime 属于 base 里那份字节，下一轮走 mtime+size 快路径
+		expect(a.state.entries[id]!.localMtime).toBe(
+			Math.round(statSync(abs).mtimeMs),
+		);
+		expect(a.state.entries[id]!.localMtime).not.toBe(before);
 	});
 });

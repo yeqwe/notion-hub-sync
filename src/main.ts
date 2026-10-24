@@ -86,6 +86,9 @@ export default class NotionHubSyncPlugin extends Plugin {
 	private pendingCache: PendingChange[] = [];
 	private pendingTimer: number | null = null;
 	private pendingScanning = false;
+	/** Coalesced state writer (see {@link scheduleStateSave}). */
+	private stateSaveTimer: number | null = null;
+	private stateSaveInFlight = false;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -228,8 +231,7 @@ export default class NotionHubSyncPlugin extends Plugin {
 					const found = entryByPath(st, oldPath);
 					if (found) found.entry.path = file.path;
 				}
-				const state = st;
-				void saveState(this.app, this.manifest.dir ?? "", state);
+				this.scheduleStateSave();
 			}),
 		);
 
@@ -1030,6 +1032,57 @@ export default class NotionHubSyncPlugin extends Plugin {
 		this.updateStatus();
 	}
 
+	/** Save the state file, COALESCED.
+	 *
+	 * A rename event used to trigger a full save immediately — on a large
+	 * vault that is a few MB written through `${path}.tmp`, and dragging 100
+	 * files fired 100 of those, racing the engine's own save on the same tmp
+	 * path. One write per burst is enough: the hints are additive and the
+	 * engine saves at the end of every round anyway. */
+	private scheduleStateSave(): void {
+		if (this.stateSaveTimer !== null) {
+			window.clearTimeout(this.stateSaveTimer);
+		}
+		this.stateSaveTimer = window.setTimeout(() => {
+			this.stateSaveTimer = null;
+			void this.flushStateSave();
+		}, 800);
+	}
+
+	/** Single-flight wrapper around {@link saveState}. */
+	private async flushStateSave(): Promise<void> {
+		if (this.stateSaveInFlight) {
+			this.scheduleStateSave(); // let the running write finish first
+			return;
+		}
+		const st = this.state;
+		if (!st) return;
+		this.stateSaveInFlight = true;
+		try {
+			await saveState(this.app, this.manifest.dir ?? "", st);
+		} catch (err) {
+			console.warn(`[notion-hub-sync] state save failed: ${String(err)}`);
+		} finally {
+			this.stateSaveInFlight = false;
+		}
+	}
+
+	onunload(): void {
+		// A pending panel rescan has nothing to report to once the plugin is
+		// gone; a pending state write does.
+		if (this.pendingTimer !== null) {
+			window.clearTimeout(this.pendingTimer);
+			this.pendingTimer = null;
+		}
+		if (this.stateSaveTimer !== null) {
+			window.clearTimeout(this.stateSaveTimer);
+			this.stateSaveTimer = null;
+			// Best effort on the way out: a dropped rename hint costs a
+			// delete+create on the remote side next round.
+			void this.flushStateSave();
+		}
+	}
+
 	/** Recompute the panel's "pending changes" list (debounced; read-only). */
 	private schedulePendingScan(): void {
 		if (this.pendingTimer !== null) window.clearTimeout(this.pendingTimer);
@@ -1047,7 +1100,11 @@ export default class NotionHubSyncPlugin extends Plugin {
 			const files = this.app.vault.getFiles().map((f) => ({
 				path: f.path,
 				size: f.stat.size,
-				mtime: f.stat.mtime,
+				// Rounded: the base records `Math.round(mtime)` and every
+				// comparison in the engine works on that form. Handing the
+				// panel a raw float made it report "modified" for the whole
+				// vault on Windows.
+				mtime: Math.round(f.stat.mtime),
 			}));
 			this.pendingCache = scanPendingChanges({
 				state: st,

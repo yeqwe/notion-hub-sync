@@ -3,6 +3,7 @@
 // one media block each. Called from runSync after the main apply.
 
 import type { NotionClient } from "../notion/client";
+import { NotionApiError } from "../notion/client";
 import { sha256Hex } from "../sync/hashes";
 import { planUpload, uploadBytes } from "../sync/upload";
 import { listChildPages } from "../sync/tree";
@@ -61,6 +62,28 @@ export interface ConfigSyncResult {
 }
 
 const hex = (id: string): string => id.replace(/-/g, "").toLowerCase();
+
+/** The shape of a `GET /pages/:id` answer this module needs. */
+interface CfgPageMeta {
+	in_trash?: boolean;
+	parent?: { page_id?: string };
+	properties?: { title?: { title?: Array<{ plain_text?: string }> } };
+}
+
+const msg = (err: unknown): string =>
+	err instanceof Error ? err.message : String(err);
+
+/** Did the API PROVE the object is absent?
+ *
+ * Only a 404 does. A page this integration cannot see is reported as 404 by
+ * Notion; a 403 means the token lost a capability — a permissions problem on
+ * OUR side, never evidence that the user deleted their settings. Timeouts,
+ * network errors and 5xx are "unknown" as well: the caller leaves the entry
+ * unevaluated, which the planner reads as "unchanged". */
+function isProvenGone(err: unknown): boolean {
+	if (!(err instanceof NotionApiError)) return false;
+	return err.status === 404 || err.code === "object_not_found";
+}
 
 const CANONICAL_JSON_MAX_BYTES = 2 * 1024 * 1024;
 
@@ -359,9 +382,9 @@ export async function syncConfig(
 		? await findConfigRoot(deps.client, state)
 		: null;
 	const audit = auditDue && configRoot !== null;
-	const pageByRel = new Map<string, string>();
+	const relOfId = new Map<string, string>();
 	for (const [rel, b] of Object.entries(state.config)) {
-		pageByRel.set(rel, b.pageId);
+		relOfId.set(b.pageId, rel);
 	}
 	const evalIds = new Set<string>();
 	if (configRoot) {
@@ -376,30 +399,51 @@ export async function syncConfig(
 		for (const id of opts.journalCandidateIds) evalIds.add(id);
 	}
 	for (const id of evalIds) {
+		// Two separate failure domains on purpose.
+		//
+		// Reading the PAGE and reading its CONTENT can fail for completely
+		// different reasons, and only one of those reasons means "it is gone".
+		// This used to be a single `catch` that recorded `deleted` for
+		// anything — a 403, a 429 that outlived its retries, a network blip,
+		// an expired signed download URL. `planConfig` answers "remote
+		// deleted, local unchanged" with `trashLocal`, so one failed request
+		// could put the user's `.obsidian/*.json` in the trash (and — because
+		// the base entry is dropped too — push the *other* device's settings
+		// to the remote copy while this one starts over from defaults).
+		//
+		// The note tree has `probePage` for exactly this distinction; the
+		// config tree needs the same rule: absence must be PROVEN.
+		let page: CfgPageMeta;
 		try {
-			const page = await deps.client.request<{
-				in_trash?: boolean;
-				parent?: { page_id?: string };
-				properties?: {
-					title?: { title?: Array<{ plain_text?: string }> };
-				};
-			}>("GET", `/pages/${id}`);
-			if (page.in_trash) {
-				const rel = [...pageByRel.entries()].find(
-					([, v]) => v === id,
-				)?.[0];
+			page = await deps.client.request<CfgPageMeta>("GET", `/pages/${id}`);
+		} catch (err) {
+			if (isProvenGone(err)) {
+				const rel = relOfId.get(id);
 				if (rel) remote[rel] = { deleted: true };
-				continue;
+			} else {
+				// "Could not ask" is not "not there": leave the entry out of
+				// `remote`, which the planner reads as "unchanged".
+				deps.debug?.(
+					`config remote ${relOfId.get(id) ?? id}: unreadable (${msg(err)}) — NOT treated as deleted`,
+				);
 			}
-			if (configRoot && hex(page.parent?.page_id ?? "") !== configRoot) {
-				continue; // not a config page
-			}
-			const rel =
-				page.properties?.title?.title
-					?.map((t) => t.plain_text ?? "")
-					.join("") ?? "";
-			if (!rel) continue;
-			const b = state.config[rel];
+			continue;
+		}
+		if (page.in_trash) {
+			const rel = relOfId.get(id);
+			if (rel) remote[rel] = { deleted: true };
+			continue;
+		}
+		if (configRoot && hex(page.parent?.page_id ?? "") !== configRoot) {
+			continue; // not a config page
+		}
+		const rel =
+			page.properties?.title?.title
+				?.map((t) => t.plain_text ?? "")
+				.join("") ?? "";
+		if (!rel) continue;
+		const b = state.config[rel];
+		try {
 			const r = await evalConfigPage(
 				deps.client,
 				id,
@@ -414,12 +458,14 @@ export async function syncConfig(
 			remote[rel] = { sha: r.sha, pageId: id };
 			if (r.bytes) remoteBytes.set(rel, r.bytes);
 			remoteBlock.set(rel, r.mediaBlockId);
-		} catch {
-			// page gone or unreadable — treat as deleted when known
-			const rel = [...pageByRel.entries()].find(
-				([, v]) => v === id,
-			)?.[0];
-			if (rel) remote[rel] = { deleted: true };
+		} catch (err) {
+			// The page exists; only its bytes are out of reach (signed URL
+			// expired mid-download, timeout, transient 5xx). Same rule as
+			// above: unevaluated = unchanged, so nothing is trashed and
+			// nothing is overwritten. The next audit retries.
+			deps.debug?.(
+				`config remote ${rel}: content unreadable (${msg(err)}) — treated as unchanged`,
+			);
 		}
 	}
 	// audit: base entries not seen → remote deleted

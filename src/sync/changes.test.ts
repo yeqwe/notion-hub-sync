@@ -56,6 +56,20 @@ describe("scanPendingChanges", () => {
 		expect(out.map((c) => c.status)).toEqual(["modified"]);
 	});
 
+	it("does not flag a float mtime that rounds to the base value", () => {
+		// Windows adapters report fractional milliseconds; the base stores
+		// Math.round(mtime). A raw `!==` here marked the whole vault as
+		// "pending" while the engine saw nothing to do.
+		const st = stateWith([
+			["a", entry("a.md", { localMtime: 1792825000985 })],
+		]);
+		const out = scanPendingChanges({
+			state: st,
+			files: [file("a.md", 1792825000985.459)],
+		});
+		expect(out).toEqual([]);
+	});
+
 	it("treats a changed size as modified even when the mtime matches", () => {
 		const st = stateWith([["a", entry("a.md")]]);
 		const out = scanPendingChanges({

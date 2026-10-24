@@ -47,16 +47,36 @@ export interface ApplyCtx {
 	recreated: Map<string, string>;
 	/** ms epoch of the last mid-apply state checkpoint. */
 	lastCheckpoint?: number;
+	/** entry count at that checkpoint (see {@link checkpoint}). */
+	lastCheckpointCount?: number;
 }
 
-/** Persist state mid-apply (throttled unless forced) so an interrupted
- * round doesn't lose track of pages already created in Notion. */
+/** Persist state mid-apply so an interrupted round doesn't lose track of
+ * pages already created in Notion.
+ *
+ * A checkpoint is a FULL serialisation+write of the state (megabytes on a
+ * large vault), and the previous "every 3 s, unconditionally" rule made a
+ * 30-minute first sync write it ~600 times. Two clocks instead:
+ *
+ *  • 3 s when the number of entries changed — a newly created page is the
+ *    only thing that can be ORPHANED by an interruption (it exists in Notion
+ *    with no record here), so those are persisted promptly;
+ *  • 30 s otherwise (content/base updates), where the worst case after a
+ *    crash is that a few files are re-evaluated — no orphan, no data loss. */
 const CHECKPOINT_MS = 3000;
+const CHECKPOINT_SLOW_MS = 30_000;
 
 async function checkpoint(ctx: ApplyCtx, force = false): Promise<void> {
 	const now = ctx.deps.now?.() ?? Date.now();
-	if (!force && now - (ctx.lastCheckpoint ?? 0) < CHECKPOINT_MS) return;
+	const since = now - (ctx.lastCheckpoint ?? 0);
+	// cheap gate first: the entry count is only computed when a write could
+	// actually happen (this runs once per action, so it must stay O(1))
+	if (!force && since < CHECKPOINT_MS) return;
+	const count = Object.keys(ctx.deps.state.entries).length;
+	const structural = count !== ctx.lastCheckpointCount;
+	if (!force && !structural && since < CHECKPOINT_SLOW_MS) return;
 	ctx.lastCheckpoint = now;
+	ctx.lastCheckpointCount = count;
 	try {
 		await ctx.deps.saveState();
 	} catch (err) {
@@ -304,6 +324,35 @@ function freePath(ctx: ApplyCtx, path: string): string {
 		),
 	);
 	return collisionFreePath(parentDir(path), basename(path), used);
+}
+
+/** Same idea as {@link freePath}, but the DISK gets the last word.
+ *
+ * `freePath` only knows the paths the state remembers. The vault also holds
+ * things the state does not: a note the user just made, a file another
+ * device restored, leftovers from an interrupted round. Writing or renaming
+ * onto one of those either overwrites it (data loss) or throws on every
+ * round (the action can never land, so the two sides never converge).
+ *
+ * `pullNew` already guards its target; the three actions that can move or
+ * materialise a file — `moveLocal`, `restoreLocal`, `createLocalFolder` —
+ * used to write blind. This is their guard. */
+async function freeDiskPath(ctx: ApplyCtx, path: string): Promise<string> {
+	const used = new Set(
+		Object.values(ctx.deps.state.entries).map((e) =>
+			e.path.toLowerCase(),
+		),
+	);
+	// Every iteration adds its candidate to `used`, so this walks
+	// `name`, `name (2)`, `name (3)`… and always terminates.
+	for (;;) {
+		const candidate = collisionFreePath(
+			parentDir(path),
+			basename(path),
+			used,
+		);
+		if (!(await ctx.deps.vault.exists(candidate))) return candidate;
+	}
 }
 
 async function pushNew(
@@ -797,7 +846,18 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 		}
 		case "createLocalFolder": {
 			const parent = parentChildDir(ctx, action.parent);
-			const path = parent === "" ? action.name : `${parent}/${action.name}`;
+			let path = parent === "" ? action.name : `${parent}/${action.name}`;
+			// `mkdirp` is a no-op when something already sits at the path, so a
+			// note that happens to carry the folder's name would make this
+			// directory silently never exist — and then every child of it fails
+			// to write, every round. Put the directory beside the occupant.
+			if ((await deps.vault.stat(path)) !== null) {
+				const free = await freeDiskPath(ctx, path);
+				report.warnings.push(
+					`${path}: a file is in the way — folder created as "${free}" instead`,
+				);
+				path = free;
+			}
 			await deps.vault.mkdirp(path);
 			recordEntry(
 				ctx,
@@ -884,7 +944,16 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 			// work": the desktop's edit is silently replaced. Defer instead —
 			// the next round evaluates the page and decides between push,
 			// pull and merge with both sides actually known.
-			if (await remoteTouchedSince(ctx, action.id)) {
+			//
+			// Only for pages the snapshot did NOT look at: when it did, the
+			// sha comparison already happened and "remote unchanged" is an
+			// observation. Asking again would cost one wasted GET per pushed
+			// note (~30 s of request budget per 100 notes) to re-learn what
+			// this round already knows.
+			if (
+				!remoteEvaluated(ctx, action.id) &&
+				(await remoteTouchedSince(ctx, action.id))
+			) {
 				report.skipped++;
 				deps.debug?.(
 					`pushContent ${state.entries[action.id]?.path ?? action.id}: remote changed since the snapshot — deferred`,
@@ -1069,8 +1138,20 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 		case "moveLocal": {
 			const e = entryOf(ctx, action.id)!;
 			const dir = parentChildDir(ctx, action.parent);
-			const to = `${dir ? `${dir}/` : ""}${action.name}`;
+			let to = `${dir ? `${dir}/` : ""}${action.name}`;
 			if (to !== e.path && (await deps.vault.exists(e.path))) {
+				// Something else may already occupy the destination — a note
+				// the user created, a copy a previous round restored. Renaming
+				// onto it overwrites on POSIX and throws on Windows, where the
+				// throw repeats on every following round and the two sides
+				// never converge. Land beside the occupant instead.
+				if (await deps.vault.exists(to)) {
+					const free = await freeDiskPath(ctx, to);
+					report.warnings.push(
+						`${e.path}: "${action.name}" already exists — moved to "${free}" instead`,
+					);
+					to = free;
+				}
 				await deps.vault.rename(e.path, to);
 			}
 			remapPaths(state, e.path, to);
@@ -1194,10 +1275,20 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 						? rside.name
 						: `${rdir}/${rside.name}`
 					: e.path;
+			// The local copy was deleted; something may have taken the name
+			// since. Writing over it would destroy a file this round never
+			// looked at, so land beside it instead.
+			let target = path;
+			if (await deps.vault.exists(target)) {
+				target = await freeDiskPath(ctx, target);
+				report.warnings.push(
+					`${path}: path was occupied — restored as "${target}" instead`,
+				);
+			}
 			const bytes = await remoteBytes(ctx, action.id);
 			const sha = await sha256Hex(bytes);
-			await writeVerified(deps.vault, path, bytes, sha);
-			e.path = path;
+			await writeVerified(deps.vault, target, bytes, sha);
+			e.path = target;
 			const rparent =
 				rside && rside.deleted === false
 					? await parentIdOf(ctx, rside.parent)
