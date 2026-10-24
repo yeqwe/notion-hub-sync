@@ -290,6 +290,14 @@ export async function pushNoteContent(
 		entry.srcSha = srcSha;
 		entry.visSha = visSha;
 		entry.localHash = srcSha;
+		// A push replaces the remote with LOCAL content, so the sha it
+		// supersedes is deliberately NOT added to `shaHistory`: going back to
+		// content this device itself wrote is a deliberate revert, and
+		// blocking it would make "undo my own edit" silently stop working.
+		// Anything in the history is unreachable by definition now, so drop
+		// it — leaving it would let a much later rollback to a long-gone
+		// version be mistaken for a stale copy.
+		entry.shaHistory = undefined;
 		// last_edited_time of the final PATCH — keeps the search-hit
 		// gate (entry.remoteEdited === result.last_edited_time) from
 		// re-evaluating a page we just wrote ourselves.
@@ -396,6 +404,9 @@ export async function pushFileContent(
 	if (entry) {
 		entry.fileSha = fileSha;
 		entry.localHash = fileSha;
+		// Same reasoning as pushNoteContent: a pushed version is authored
+		// here, so nothing older is a "stale copy" worth recognising.
+		entry.shaHistory = undefined;
 		const blockId = appended.results?.[0]?.id;
 		if (blockId) {
 			entry.mediaBlockId = blockId.replace(/-/g, "").toLowerCase();

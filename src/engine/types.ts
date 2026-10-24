@@ -67,6 +67,12 @@ export interface PlanInput {
 	 * comes from the item's kind — a folder has no extension and would
 	 * otherwise be classified as "other" and dropped. */
 	skipPath?: (path: string, isDir: boolean) => boolean;
+	/** Shas this entry has already superseded, newest first
+	 * (`SyncEntry.shaHistory`). A local file hashing to one of them was not
+	 * edited — it was rolled back by something outside Obsidian. Treating
+	 * that as a local edit is what makes a phone that slept through a day of
+	 * work push the OLD version back up and erase the desktop's newer one. */
+	staleShas?: (id: string) => readonly string[] | undefined;
 }
 
 export type Action =
@@ -79,7 +85,9 @@ export type Action =
 	| { type: "pushNew"; localPath: string; kind: Kind; parent: ParentRef }
 	| { type: "pullNew"; id: string; kind: Kind; parent: ParentRef; name: string }
 	| { type: "pushContent"; id: string }
-	| { type: "pullContent"; id: string }
+	| { type: "pullContent"; id: string; /** local copy was an OLD version,
+	 * not an edit — reported so the user knows why the file changed back. */
+		stale?: true }
 	| { type: "merge"; id: string }
 	| { type: "conflictCopy"; id: string }
 	| { type: "localConflictCopy"; localPath: string; conflictsWith: string }

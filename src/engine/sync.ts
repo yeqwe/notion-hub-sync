@@ -289,6 +289,11 @@ export async function runSync(
 			skipPath: scope
 				? (p, isDir) => !scope.allows(p, isDir)
 				: undefined,
+			// A local file whose bytes are a version this entry already left
+			// behind was ROLLED BACK, not edited. Pushing it is the bug that
+			// lets a phone that slept through a day of work restore yesterday's
+			// note over the desktop's newer one.
+			staleShas: (id) => state.entries[id]?.shaHistory,
 		});
 	let actions = planActions();
 	tr.phase(

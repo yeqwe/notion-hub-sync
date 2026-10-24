@@ -5,10 +5,16 @@
 
 import { sha256Hex } from "../sync/hashes";
 import { NotionApiError } from "../notion/client";
-import { basename, parentDir, type VaultFile } from "../sync/vault-io";
+import {
+	basename,
+	parentDir,
+	writeTextVerified,
+	writeVerified,
+	type VaultFile,
+} from "../sync/vault-io";
 import { collisionFreePath, conflictPath, childDirOf } from "../sync/paths";
 import { newReport, type SyncDeps, type SyncReport } from "../sync/deps";
-import type { SyncEntry } from "../sync/state";
+import { recordBaseSha, type SyncEntry } from "../sync/state";
 import {
 	createPage,
 	pushNoteContent,
@@ -17,6 +23,7 @@ import {
 	makeLinks,
 } from "../sync/push";
 import { fetchNoteContent, fetchFileContent, RemoteTooLargeError } from "../sync/pull";
+import { getPage } from "./remote-audit";
 import { safeRecordVersion } from "../sync/history";
 import { Semaphore } from "../sync/pool";
 import { merge3Text } from "./merge3";
@@ -77,6 +84,47 @@ function mergeScratch(dst: SyncReport, src: SyncReport): void {
 
 function entryOf(ctx: ApplyCtx, id: string): SyncEntry | undefined {
 	return ctx.deps.state.entries[id];
+}
+
+/** Was this entry's REMOTE content compared this round?
+ *
+ * The planner treats an id missing from `remote` as "unchanged", which is
+ * right for deciding what to DO — the remote snapshot only spends requests
+ * on pages that might have changed. It is NOT safe as a licence to overwrite:
+ * an unevaluated page may well be newer. A push is irreversible for the other
+ * device, so it needs an observation, not an assumption. */
+function remoteEvaluated(ctx: ApplyCtx, id: string): boolean {
+	return ctx.remoteSnap.remote[id] !== undefined;
+}
+
+/** Did the remote page change since this round's snapshot?
+ *
+ * Used as the last gate before a push. `pushContent` is planned from
+ * "local changed, remote unchanged" — but in an INCREMENTAL round the remote
+ * side of most entries was never looked at (only journal candidates, search
+ * hits and the round-robin sample are evaluated). An unevaluated entry reads
+ * as "unchanged", so a page edited on another device a minute ago would be
+ * overwritten with this device's version without anyone comparing them.
+ *
+ * One GET /pages per push is a fair price for not losing that edit: a push is
+ * irreversible for the other device, while a deferral just costs a round.
+ * `last_edited_time` is minute-rounded and API writes don't bump it, so it is
+ * only trusted in ONE direction: a DIFFERENT value proves the page changed;
+ * an equal value proves nothing, and the push proceeds (the sha comparison in
+ * the next round still catches the rare same-minute collision). */
+async function remoteTouchedSince(
+	ctx: ApplyCtx,
+	id: string,
+): Promise<boolean> {
+	const e = entryOf(ctx, id);
+	if (!e?.remoteEdited) return false; // nothing recorded to compare against
+	try {
+		const info = await getPage(ctx.deps.client, id);
+		if (info === null || info.inTrash) return false; // gone: pushNew path
+		return info.lastEdited !== undefined && info.lastEdited !== e.remoteEdited;
+	} catch {
+		return false; // unreadable: let the push through, next round verifies
+	}
 }
 
 function localPathOf(ctx: ApplyCtx, id: string): string {
@@ -706,8 +754,7 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 			const wanted = dir === "" ? action.name : `${dir}/${action.name}`;
 			const path = (await deps.vault.exists(wanted))
 				? freePath(ctx, wanted)
-				: wanted;
-			let bytes: Uint8Array;
+				: wanted;			let bytes: Uint8Array;
 			try {
 				bytes = await remoteBytes(ctx, action.id, action.kind);
 			} catch (err) {
@@ -723,9 +770,9 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 					throw err;
 				}
 			}
-			await deps.vault.writeBinary(path, bytes.buffer as ArrayBuffer);
-			const meta = ctx.remoteSnap.fetchedMeta.get(action.id);
 			const sha = await sha256Hex(bytes);
+			await writeVerified(deps.vault, path, bytes, sha);
+			const meta = ctx.remoteSnap.fetchedMeta.get(action.id);
 			const e = recordEntry(
 				ctx,
 				action.id,
@@ -753,6 +800,25 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 				report.skipped++;
 				deps.debug?.(
 					`pushContent ${state.entries[action.id]?.path ?? action.id}: local changed since snapshot — deferred to next round`,
+				);
+				break;
+			}
+			// Last gate before the remote is overwritten: was this page
+			// evaluated this round? If not, "remote unchanged" is an
+			// ASSUMPTION, not an observation — an incremental round only looks
+			// at journal candidates, search hits and the round-robin sample, so
+			// a page edited on another device (or through the Notion UI, which
+			// bumps last_edited_time by a minute at most) can be absent from
+			// this round's `remote` map while its content is newer.
+			//
+			// Overwriting it there is the other half of "the phone undid my
+			// work": the desktop's edit is silently replaced. Defer instead —
+			// the next round evaluates the page and decides between push,
+			// pull and merge with both sides actually known.
+			if (await remoteTouchedSince(ctx, action.id)) {
+				report.skipped++;
+				deps.debug?.(
+					`pushContent ${state.entries[action.id]?.path ?? action.id}: remote changed since the snapshot — deferred`,
 				);
 				break;
 			}
@@ -791,6 +857,11 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 			}
 			const e = entryOf(ctx, action.id)!;
 			const bytes = await remoteBytes(ctx, action.id);
+			if (action.stale) {
+				report.warnings.push(
+					`${e.path}: local copy was an older version (not an edit) — restored from Notion`,
+				);
+			}
 			try {
 				const local = new Uint8Array(
 					await deps.vault.readBinary(e.path),
@@ -806,13 +877,11 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 			} catch {
 				/* no local copy */
 			}
-			await deps.vault.writeBinary(
-				e.path,
-				bytes.buffer as ArrayBuffer,
-			);
 			const sha = await sha256Hex(bytes);
-			e.localHash = sha;
-			e.srcSha = sha;
+			// The local file is being REPLACED by remote content: remember what
+			// the base held so a later rollback of this file is recognisable.
+			await writeVerified(deps.vault, e.path, bytes, sha);
+			recordBaseSha(e, sha, { history: true });
 			e.fileSha = e.kind === "file" ? sha : e.fileSha;
 			const meta = ctx.remoteSnap.fetchedMeta.get(action.id);
 			if (meta?.visSha) e.visSha = meta.visSha;
@@ -842,7 +911,17 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 			const m =
 				base === null ? null : merge3Text(base, local, remote);
 			if (m && m.clean) {
-				await deps.vault.writeText(e.path, m.text!);
+				const merged = m.text!;
+				// Verified: the base is about to record these bytes as
+				// "what both sides agree on", so a truncated write would make
+				// that record permanently wrong — and the next round would read
+				// the truncation as a local edit and push it.
+				await writeTextVerified(
+					deps.vault,
+					e.path,
+					merged,
+					await sha256Hex(new TextEncoder().encode(merged)),
+				);
 				await writeRemoteContent(ctx, action.id);
 				await ctx.baseStore.put(action.id, m.text!);
 				ctx.journalOps.push({
@@ -1024,18 +1103,15 @@ async function applyOne(action: Action, ctx: ApplyCtx): Promise<void> {
 						: `${rdir}/${rside.name}`
 					: e.path;
 			const bytes = await remoteBytes(ctx, action.id);
-			await deps.vault.writeBinary(
-				path,
-				bytes.buffer as ArrayBuffer,
-			);
+			const sha = await sha256Hex(bytes);
+			await writeVerified(deps.vault, path, bytes, sha);
 			e.path = path;
 			const rparent =
 				rside && rside.deleted === false
 					? await parentIdOf(ctx, rside.parent)
 					: e.parentId;
 			e.parentId = rparent;
-			e.localHash = await sha256Hex(bytes);
-			e.srcSha = e.localHash;
+			recordBaseSha(e, sha, { history: true });
 			if (e.kind === "note") {
 				await ctx.baseStore.putIfFits(action.id, bytes);
 			}
@@ -1074,10 +1150,10 @@ async function doConflictCopy(
 		(msg) => report.warnings.push(msg),
 	);
 	const remote = await remoteBytes(ctx, id);
-	await deps.vault.writeBinary(e.path, remote.buffer as ArrayBuffer);
 	const sha = await sha256Hex(remote);
-	e.localHash = sha;
-	e.srcSha = sha;
+	await writeVerified(deps.vault, e.path, remote, sha);
+	// local was overwritten with remote content → remember the outgoing sha
+	recordBaseSha(e, sha, { history: true });
 	if (e.kind === "note") await ctx.baseStore.putIfFits(id, remote);
 	await stampLocal(ctx, e);
 	report.updated++;

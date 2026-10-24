@@ -20,6 +20,20 @@ export interface SyncEntry {
 	/** M4: local mtime/size at last sync — lets the local snapshot reuse sha. */
 	localMtime?: number;
 	localSize?: number;
+	/** Shas the base held BEFORE the current one, newest first, limited to
+	 * versions that arrived FROM the remote (a pull / conflict copy / restore
+	 * overwrote the local file with them).
+	 *
+	 * This is what tells "the user edited this file" apart from "the file was
+	 * rolled back": a local file whose bytes hash to one of these was not
+	 * edited, it was replaced by an older copy (iCloud replaying a vault, a
+	 * second sync tool, an editor restoring a buffer after the process was
+	 * killed). Pushing that would overwrite a NEWER remote version with an
+	 * older one — a phone that slept through a day of work erasing it on the
+	 * next foreground sync. Only remote-sourced versions are recorded here on
+	 * purpose: rolling back past content the user themselves pushed is much
+	 * more likely to be a deliberate revert. */
+	shaHistory?: string[];
 	/** M6: last seen remote last_edited_time — unchanged ⇒ not a candidate. */
 	remoteEdited?: string;
 	/** M6: versions recorded for this entry (gates retention listing). */
@@ -89,6 +103,43 @@ export interface SyncState {
 
 export function emptyState(rootPageId: string): SyncState {
 	return { version: 1, rootPageId, entries: {} };
+}
+
+/** How many superseded shas one entry remembers. Eight versions is far more
+ * than any rollback a stale client produces, and costs a few hundred bytes
+ * per entry. */
+export const SHA_HISTORY_MAX = 8;
+
+/** The sha the base currently holds (what the last round left both sides
+ * agreeing on), or null when this entry has never carried content. */
+export function baseShaOf(e: SyncEntry): string | null {
+	return e.srcSha ?? e.localHash ?? e.fileSha ?? null;
+}
+
+/**
+ * Move the entry's base sha to `next`.
+ *
+ * `history` must be true only when the LOCAL file was just overwritten with
+ * remote content: that is the only case where the outgoing sha becomes a
+ * version the local disk may later "roll back to" without the user editing
+ * anything. A push replaces the remote with local content, so its previous
+ * sha is deliberately not remembered (see `SyncEntry.shaHistory`).
+ */
+export function recordBaseSha(
+	e: SyncEntry,
+	next: string | null,
+	opts?: { history?: boolean },
+): void {
+	const prev = baseShaOf(e);
+	if (opts?.history && prev !== null && next !== null && prev !== next) {
+		const kept = (e.shaHistory ?? []).filter(
+			(s) => s !== prev && s !== next,
+		);
+		kept.unshift(prev);
+		e.shaHistory = kept.slice(0, SHA_HISTORY_MAX);
+	}
+	e.localHash = next ?? undefined;
+	e.srcSha = next ?? undefined;
 }
 
 export function entryByPath(

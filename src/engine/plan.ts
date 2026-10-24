@@ -489,7 +489,23 @@ export function plan(input: PlanInput): Action[] {
 
 		// both alive — content first, then location
 		if (!isFolder) {
-			if (le.changed && re.changed && le.side!.sha !== re.side!.sha) {
+			const lsha = le.side === null ? null : le.side.sha;
+			// The local bytes are an OLD version this entry has already moved
+			// past. That is a rollback, not an edit: pushing it would overwrite
+			// a NEWER remote with an older one — the "phone woke up and undid
+			// my day's work" report. Whatever the remote holds is the truth;
+			// pulling it also restores the file that was rolled back.
+			const stale =
+				le.changed &&
+				lsha !== null &&
+				(input.staleShas?.(id)?.includes(lsha) ?? false);
+			if (stale) {
+				// remote not evaluated this round → it still holds the base
+				const remoteSha = re.side === null ? base.sha : re.side.sha;
+				if (remoteSha !== lsha) {
+					contents.push({ type: "pullContent", id, stale: true });
+				}
+			} else if (le.changed && re.changed && le.side!.sha !== re.side!.sha) {
 				contents.push(
 					b.kind === "note"
 						? { type: "merge", id }

@@ -242,6 +242,9 @@ describe("request budget", () => {
 		// +1 vs before: the reserved-container lookup lists the root's
 		// children once instead of blindly creating a second 🗄️ page
 		// (that duplicate later got pulled back as vault notes).
-		expect(fake.reqLog.length).toBeLessThanOrEqual(15);
+		// +1 more: a push now re-reads the page's last_edited_time before
+		// overwriting it, so a remote edit made after this round's snapshot
+		// is not silently replaced (see `remoteTouchedSince`).
+		expect(fake.reqLog.length).toBeLessThanOrEqual(16);
 	});
 });

@@ -92,7 +92,10 @@ describe("request budgets", () => {
 			`idle=${idle} edit=${edit}`,
 			JSON.stringify(byOp(fake)),
 		);
-		expect(edit).toBeLessThanOrEqual(idle + 6);
+		// +1 vs the pre-existing budget: a push re-reads the page's
+		// last_edited_time before overwriting, so a remote edit made after
+		// this round's snapshot is not silently replaced.
+		expect(edit).toBeLessThanOrEqual(idle + 7);
 	});
 
 	it("pushNew stamps fileSha/mediaBlockId even with dashed page ids", async () => {
