@@ -42,6 +42,19 @@ describe("定时器与失败轮次的时钟", () => {
 		expect(lastRoundEnd(null)).toBeUndefined();
 	});
 
+	it("一次失败之后的成功轮次照常推进时钟（不能卡在失败那一刻）", () => {
+		// 真实现场：13:13 一轮 ERR_CONNECTION_RESET 写下 lastRoundAt，之后
+		// 每轮都成功，但 lastRoundEnd 一直返回 13:13 → 每分钟都触发一轮。
+		const state = {
+			version: 1 as const,
+			rootPageId: "r",
+			entries: {},
+			lastRoundAt: 1000,
+			lastSyncAt: 9000,
+		};
+		expect(lastRoundEnd(state)).toBe(9000);
+	});
+
 	it("暂停时不跑自动轮，手动仍可", () => {
 		const s = {
 			autoSync: true,

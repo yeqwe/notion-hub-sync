@@ -93,7 +93,13 @@ export interface AutoSyncHooks {
  * advances on a completed round, so gating on it makes a device that keeps
  * failing retry on every minute tick; `lastRoundAt` is the honest clock. */
 export function lastRoundEnd(state: SyncState | null): number | undefined {
-	return state?.lastRoundAt ?? state?.lastSyncAt;
+	const a = state?.lastRoundAt;
+	const b = state?.lastSyncAt;
+	if (a === undefined) return b;
+	if (b === undefined) return a;
+	// `lastRoundAt` is only written by FAILED rounds; preferring it outright
+	// froze the clock at the last failure and fired a round every minute.
+	return Math.max(a, b);
 }
 
 /** Auto triggers require a completed manual sync on this device and that
