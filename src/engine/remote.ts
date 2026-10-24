@@ -8,11 +8,12 @@ import { sha256Hex } from "../sync/hashes";
 import {
 	splitPageMarkdown,
 	visibleHash,
-	decidePullContent,
 	summaryLine,
 } from "../sync/toggle";
-import { notionToObsidian } from "../convert/notion-to-obsidian";
-import { renderMatchesSource } from "../sync/source-compare";
+import {
+	pullTextFromSplit,
+	renderMatchesSource,
+} from "../sync/source-compare";
 import type { LinkResolver } from "../convert/links";
 import { sanitizeTitle } from "../sync/paths";
 import { walkTree, type Node } from "../sync/pull";
@@ -702,13 +703,7 @@ async function evalNote(
 			return { sha: baseSha, meta: { visSha } };
 		}
 	}
-	const decision = decidePullContent(split, visSha);
-	const bytes =
-		decision.kind === "source"
-			? decision.bytes
-			: new TextEncoder().encode(
-					notionToObsidian(split.visible, { links }),
-				);
+	const bytes = pullTextFromSplit(split, visSha, links, entry.path);
 	return {
 		sha: await sha256Hex(bytes),
 		bytes,
@@ -869,21 +864,7 @@ async function evalNewSha(
 		const split = await splitPageMarkdown(res.markdown ?? "");
 		if (!split.source && split.visible.trim() === "") return null;
 		const visSha = await visibleHash(split.visible);
-		const decision = decidePullContent(split, visSha);
-		let bytes: Uint8Array;
-		if (decision.kind === "source") {
-			bytes = decision.bytes;
-		} else if (
-			split.source?.bytes &&
-			renderMatchesSource(split.source.bytes, split.visible, links)
-		) {
-			bytes = split.source.bytes;
-		} else {
-			bytes = new TextEncoder().encode(
-				notionToObsidian(split.visible, { links }),
-			);
-		}
-		return sha256Hex(bytes);
+		return sha256Hex(pullTextFromSplit(split, visSha, links));
 	}
 	if (kind === "file") {
 		const r = await evalFile(deps, id, {
@@ -927,25 +908,7 @@ async function evalNew(
 		// empty remote shell (interrupted push): no remote content → local wins
 		if (!(!split.source && split.visible.trim() === "")) {
 			const visSha = await visibleHash(split.visible);
-			const decision = decidePullContent(split, visSha);
-			let bytes: Uint8Array;
-			if (decision.kind === "source") {
-				bytes = decision.bytes;
-			} else if (
-				split.source?.bytes &&
-				renderMatchesSource(
-					split.source.bytes,
-					split.visible,
-					links,
-				)
-			) {
-				bytes = split.source.bytes;
-			} else {
-				bytes = new TextEncoder().encode(
-					notionToObsidian(split.visible, { links }),
-				);
-			}
-			sha = await sha256Hex(bytes);
+			sha = await sha256Hex(pullTextFromSplit(split, visSha, links));
 		}
 	} else if (kind === "file") {
 		const r = await evalFile(deps, node.pageId, {

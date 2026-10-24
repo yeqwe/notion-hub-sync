@@ -1,12 +1,11 @@
 import type { NotionClient } from "../notion/client";
-import { notionToObsidian } from "../convert/notion-to-obsidian";
 import type { LinkResolver } from "../convert/links";
 import {
 	decidePullContent,
 	splitPageMarkdown,
 	visibleHash,
 } from "./toggle";
-import { renderMatchesSource } from "./source-compare";
+import { pullTextFromSplit } from "./source-compare";
 import { sha256Hex } from "./hashes";
 import { writeTextVerified, writeVerified } from "./vault-io";
 import { basename, parentDir } from "./vault-io";
@@ -271,21 +270,7 @@ export async function fetchNoteContent(
 	const split = await splitPageMarkdown(raw);
 	const visSha = await visibleHash(split.visible);
 	const decision = decidePullContent(split, visSha);
-	let bytes: Uint8Array;
-	if (decision.kind === "source") {
-		bytes = decision.bytes;
-	} else if (
-		split.source?.bytes &&
-		renderMatchesSource(split.source.bytes, split.visible, links)
-	) {
-		// Render drift, not a human edit: the recorded source is still
-		// the lossless form of what's on the page — prefer it.
-		bytes = split.source.bytes;
-	} else {
-		bytes = new TextEncoder().encode(
-			notionToObsidian(split.visible, { links }),
-		);
-	}
+	const bytes = pullTextFromSplit(split, visSha, links);
 	return { bytes, split, visSha, decision };
 }
 
